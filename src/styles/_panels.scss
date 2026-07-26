@@ -1,0 +1,150 @@
+@use 'tokens' as *;
+@use 'mixins' as *;
+
+.panel {
+  @include panel;
+
+  position: absolute;
+  left: calc(env(safe-area-inset-left, 0px) + 0.75rem);
+  bottom: calc(env(safe-area-inset-bottom, 0px) + 0.75rem);
+  width: min(20rem, calc(100vw - 10rem));
+  max-height: 46vh;
+  padding: 0.75rem 0.9rem;
+  overflow-y: auto;
+
+  &[hidden] {
+    display: none;
+  }
+}
+
+.panel__title {
+  margin: 0 0 0.25rem;
+  font-family: $font-body;
+  font-size: 1.05rem;
+  font-weight: 600;
+}
+
+.panel__status {
+  margin: 0 0 0.5rem;
+  color: $ink-soft;
+  font-size: 0.88rem;
+}
+
+.panel__note {
+  margin: 0.4rem 0 0;
+  color: $ink-soft;
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+
+.panel__list {
+  margin: 0.25rem 0;
+  padding-left: 1.1rem;
+  font-size: 0.85rem;
+  line-height: 1.65;
+
+  &:empty {
+    display: none;
+  }
+}
+
+.panel__action {
+  @include tappable;
+
+  display: block;
+  width: 100%;
+  margin-top: 0.5rem;
+  border: 1px solid $rule;
+  background: $parchment-deep;
+  color: $ink;
+  font-size: 0.9rem;
+}
+
+.panel__action--danger {
+  color: $brick;
+  border-color: color-mix(in srgb, $brick 40%, $rule);
+}
+
+.buildmenu,
+.gamemenu {
+  @include panel;
+
+  position: absolute;
+  left: 50%;
+  bottom: calc(env(safe-area-inset-bottom, 0px) + 0.75rem);
+  transform: translateX(-50%);
+  width: min(34rem, calc(100vw - 1.5rem));
+  max-height: 62vh;
+  padding: 0.85rem;
+  overflow-y: auto;
+
+  &[hidden] {
+    display: none;
+  }
+}
+
+.buildmenu__title,
+.gamemenu__title {
+  margin: 0 0 0.6rem;
+  font-family: $font-body;
+  font-size: 1.05rem;
+  font-weight: 600;
+  text-align: center;
+}
+
+.buildmenu__grid {
+  display: grid;
+  // Cards stay finger-sized: two per row on a phone, more on a wider screen.
+  grid-template-columns: repeat(auto-fill, minmax(9.5rem, 1fr));
+  gap: 0.5rem;
+}
+
+.card {
+  @include tappable;
+
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  height: 100%;
+  padding: 0.55rem 0.6rem;
+  border: 1px solid $rule;
+  background: $parchment-deep;
+  color: $ink;
+  text-align: left;
+
+  &:active {
+    transform: translateY(1px);
+  }
+}
+
+.card__name {
+  font-weight: 600;
+  font-size: 0.92rem;
+}
+
+.card__cost {
+  color: $ochre;
+  font-size: 0.78rem;
+}
+
+.card__note {
+  color: $ink-soft;
+  font-size: 0.75rem;
+  line-height: 1.35;
+}
+
+.gamemenu__item {
+  @include tappable;
+
+  display: block;
+  width: 100%;
+  margin-bottom: 0.4rem;
+  border: 1px solid $rule;
+  background: $parchment-deep;
+  color: $ink;
+  font-size: 0.95rem;
+}
+
+.gamemenu__item--quit {
+  color: $brick;
+}

@@ -1,0 +1,28 @@
+@use 'tokens' as *;
+
+// Keeps content clear of notches, rounded corners and the home indicator.
+@mixin safe-area($extra: 0px) {
+  padding-top: calc(env(safe-area-inset-top, 0px) + #{$extra});
+  padding-right: calc(env(safe-area-inset-right, 0px) + #{$extra});
+  padding-bottom: calc(env(safe-area-inset-bottom, 0px) + #{$extra});
+  padding-left: calc(env(safe-area-inset-left, 0px) + #{$extra});
+}
+
+@mixin panel {
+  background: $panel-bg;
+  border: 1px solid $rule;
+  border-radius: $radius;
+  box-shadow: $panel-shadow;
+  backdrop-filter: blur(2px);
+}
+
+@mixin tappable {
+  min-height: $touch-target;
+  padding: 0.6rem 1rem;
+  border-radius: $radius-small;
+  font: inherit;
+  cursor: pointer;
+  // Stops the grey flash and the double-tap-to-zoom delay on touch devices.
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+}

@@ -1,0 +1,54 @@
+@use 'tokens' as *;
+@use 'mixins' as *;
+@use 'title';
+@use 'hud';
+@use 'panels';
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+  // The map is a fixed viewport; nothing on the page itself should scroll.
+  overflow: hidden;
+  overscroll-behavior: none;
+  background: $ink;
+  color: $ink;
+  font-family: $font-ui;
+  // Stops iOS enlarging text when the device is turned to landscape.
+  -webkit-text-size-adjust: 100%;
+}
+
+.app {
+  position: relative;
+  // Dynamic viewport units so a phone's collapsing address bar cannot crop the
+  // bottom row of controls.
+  width: 100vw;
+  height: 100dvh;
+  overflow: hidden;
+  background: $parchment;
+}
+
+button {
+  font-family: inherit;
+}
+
+// Anything that is scrollable inside a panel keeps momentum scrolling on iOS.
+.panel,
+.buildmenu,
+.gamemenu,
+.title {
+  -webkit-overflow-scrolling: touch;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

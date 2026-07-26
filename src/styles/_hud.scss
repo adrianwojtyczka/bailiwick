@@ -1,0 +1,153 @@
+@use 'tokens' as *;
+@use 'mixins' as *;
+
+.map {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  // The map handles its own panning and pinching; the browser must not also
+  // scroll or zoom the page underneath it.
+  touch-action: none;
+  user-select: none;
+}
+
+.hud {
+  position: absolute;
+  inset: 0;
+  // The HUD is a transparent overlay: only its own controls take input, so
+  // taps fall through to the map everywhere else.
+  pointer-events: none;
+  font-family: $font-ui;
+
+  > * {
+    pointer-events: auto;
+  }
+}
+
+.hud__bar {
+  @include panel;
+
+  position: absolute;
+  top: calc(env(safe-area-inset-top, 0px) + 0.5rem);
+  left: calc(env(safe-area-inset-left, 0px) + 0.5rem);
+  right: calc(env(safe-area-inset-right, 0px) + 0.5rem);
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.35rem 0.5rem;
+}
+
+.hud__stats {
+  display: flex;
+  flex: 1;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  min-width: 0;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.15rem 0.45rem;
+  border: 1px solid $rule;
+  border-radius: 999px;
+  background: rgba(232, 216, 180, 0.7);
+  font-size: 0.82rem;
+  white-space: nowrap;
+}
+
+.chip__swatch {
+  width: 0.7rem;
+  height: 0.7rem;
+  border: 1px solid rgba(51, 38, 26, 0.5);
+  border-radius: 2px;
+}
+
+.chip__label {
+  color: $ink-soft;
+}
+
+.chip__value {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+.hud__menubutton {
+  @include tappable;
+
+  flex: 0 0 auto;
+  min-height: 38px;
+  padding: 0.35rem 0.7rem;
+  border: 1px solid $rule;
+  background: $parchment-deep;
+  color: $ink;
+}
+
+.hud__ticker {
+  position: absolute;
+  top: calc(env(safe-area-inset-top, 0px) + 3.6rem);
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: min(92vw, 32rem);
+  padding: 0 0.7rem;
+  border-radius: $radius-small;
+  background: rgba(51, 38, 26, 0.82);
+  color: $parchment;
+  font-size: 0.85rem;
+  line-height: 1.9;
+  text-align: center;
+  pointer-events: none;
+
+  &:empty {
+    display: none;
+  }
+}
+
+.hud__ticker--warning {
+  background: rgba(156, 65, 40, 0.92);
+}
+
+.hud__actions {
+  position: absolute;
+  right: calc(env(safe-area-inset-right, 0px) + 0.75rem);
+  bottom: calc(env(safe-area-inset-bottom, 0px) + 0.75rem);
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  align-items: stretch;
+}
+
+.action {
+  @include tappable;
+
+  min-width: 6.5rem;
+  border: 1px solid $rule;
+  background: $panel-bg;
+  color: $ink;
+  box-shadow: $panel-shadow;
+  font-size: 0.95rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.action--primary {
+  background: $ochre;
+  border-color: color-mix(in srgb, $ochre 70%, $ink);
+  color: $parchment;
+  font-weight: 600;
+}
+
+.action--cancel {
+  color: $brick;
+}
+
+.loading {
+  display: grid;
+  place-items: center;
+  height: 100%;
+  color: $ink-soft;
+  font-family: $font-body;
+  font-size: 1.1rem;
+}

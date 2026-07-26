@@ -1,0 +1,9 @@
+node_modules/
+.vite/
+playwright-report/
+test-results/
+*.local
+.DS_Store
+
+# The built game (index.html, assets/, sw.js, manifest.webmanifest) is
+# deliberately committed at the repository root so GitHub Pages can serve it.
