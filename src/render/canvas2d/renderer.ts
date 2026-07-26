@@ -360,7 +360,7 @@ export class CanvasRenderer implements Renderer {
       const row = grid.yOf(settler.point);
       if (row < bounds.minRow - 2 || row > bounds.maxRow + 2) return;
 
-      const t = simulation.stepFraction(settler);
+      const t = simulation.stepFraction(settler, view.alpha);
       const fromX = this.screenX(settler.fromPoint);
       const fromY = this.screenY(settler.fromPoint);
       const toX = this.screenX(settler.toPoint);

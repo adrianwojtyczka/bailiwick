@@ -25,6 +25,7 @@ export interface HudCallbacks {
   cancelMode(): void;
   demolishBuilding(point: number): void;
   demolishFlag(point: number): void;
+  demolishRoad(point: number): void;
   startRoad(flagPoint: number): void;
   placeFlag(point: number): void;
   setSpeed(speed: number): void;
@@ -380,9 +381,11 @@ export class Hud {
   }
 
   private showGroundPanel(point: number): void {
-    const space = evaluateBuildSpace(this.simulation.world, point, this.playerId);
+    const world = this.simulation.world;
+    const onRoad = world.roadCount(point) > 0;
+    const space = evaluateBuildSpace(world, point, this.playerId);
 
-    if (space === BuildSpace.None) {
+    if (space === BuildSpace.None && !onRoad) {
       this.showPanel([
         el('h2', { class: 'panel__title' }, 'Open ground'),
         el('p', { class: 'panel__note' }, 'Nothing can be built here.'),
@@ -390,13 +393,30 @@ export class Hud {
       return;
     }
 
-    const fits = AVAILABLE_BUILDINGS.filter((info) => canHostSize(space, info.size));
-
     const children: HTMLElement[] = [
-      el('h2', { class: 'panel__title' }, 'Open ground'),
-      button('Place a flag', 'panel__action', () => this.callbacks.placeFlag(point)),
+      el('h2', { class: 'panel__title' }, onRoad ? 'Road' : 'Open ground'),
     ];
 
+    if (space !== BuildSpace.None) {
+      children.push(
+        button('Place a flag', 'panel__action', () => this.callbacks.placeFlag(point)),
+      );
+    }
+
+    if (onRoad) {
+      // Removing the road here leaves both its flags standing, unlike removing
+      // a flag, which takes every road meeting it.
+      children.push(
+        el('p', { class: 'panel__note' }, 'A flag here divides the road into two stretches.'),
+        button('Remove this road', 'panel__action panel__action--danger', () =>
+          this.callbacks.demolishRoad(point),
+        ),
+      );
+      this.showPanel(children);
+      return;
+    }
+
+    const fits = AVAILABLE_BUILDINGS.filter((info) => canHostSize(space, info.size));
     if (fits.length > 0) {
       children.push(
         el('p', { class: 'panel__note' }, `Room for: ${fits.map((info) => info.name).join(', ')}`),

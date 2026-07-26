@@ -1,11 +1,17 @@
 import { describe, expect, it } from 'vitest';
 import { BuildingType, buildingInfo } from './data/buildings';
 import { Ware } from './data/wares';
-import { BuildingState, BuildingStatus, FLAG_CAPACITY } from './entities/types';
+import { BuildingState, BuildingStatus, FLAG_CAPACITY, SettlerState } from './entities/types';
 import { Simulation } from './simulation';
 import { planRoad } from './transport/pathfinding';
-import { BuildSpace, canHostSize, canPlaceFlag, evaluateBuildSpace } from './world/buildspace';
-import { MapObject } from './world/terrain';
+import {
+  BuildingSize,
+  BuildSpace,
+  canHostSize,
+  canPlaceFlag,
+  evaluateBuildSpace,
+} from './world/buildspace';
+import { MapObject, Resource } from './world/terrain';
 
 const PLAYER = 1;
 
@@ -560,5 +566,216 @@ describe('recovering from a torn-up network', () => {
     // site look satisfied for good, so nothing more was ever sent.
     run(sim, 6000);
     expect(site.state).toBe(BuildingState.Complete);
+  });
+});
+
+describe('working away from the building', () => {
+  /** A fishery site with as much fish as possible inside its work radius. */
+  function fisherySite(sim: Simulation): number | undefined {
+    const hq = headquarters(sim);
+    const info = buildingInfo(BuildingType.Fishery);
+
+    let best: number | undefined;
+    let bestFish = 0;
+
+    for (const point of sim.world.grid.pointsWithin(hq.point, 9)) {
+      if (sim.world.grid.distance(hq.point, point) < 3) continue;
+      const space = evaluateBuildSpace(sim.world, point, PLAYER);
+      if (space === BuildSpace.None || !canHostSize(space, info.size)) continue;
+
+      const shoals = sim.world.grid
+        .pointsWithin(point, 6)
+        .filter((p) => sim.world.resource[p] === Resource.Fish && sim.world.resourceAmount[p]! > 0);
+      if (shoals.length > bestFish) {
+        bestFish = shoals.length;
+        best = point;
+      }
+    }
+
+    return bestFish > 0 ? best : undefined;
+  }
+
+  function buildFishery(sim: Simulation): number | undefined {
+    const point = fisherySite(sim);
+    if (point === undefined) return undefined;
+    if (!sim.placeBuilding(PLAYER, point, BuildingType.Fishery).ok) return undefined;
+
+    const hut = sim.buildings.find((candidate) => candidate.point === point)!;
+    const route = planRoad(sim.world, headquarters(sim).flagPoint, hut.flagPoint, PLAYER);
+    if (route) sim.placeRoad(PLAYER, route);
+    return hut.id;
+  }
+
+  it('sends the fisherman out to the water and brings fish back', () => {
+    const sim = newGame();
+    const id = buildFishery(sim)!;
+    expect(id).toBeDefined();
+
+    const before = sim.storedWare(PLAYER, Ware.Fish);
+
+    // Watch for the fisherman actually leaving the hut at some point.
+    let wentOut = false;
+    for (let i = 0; i < 9000; i += 1) {
+      sim.update();
+      const worker = sim.settlers.get(sim.buildings.require(id).worker);
+      if (
+        worker &&
+        (worker.state === SettlerState.WalkingToTask ||
+          worker.state === SettlerState.PerformingTask ||
+          worker.state === SettlerState.ReturningHome)
+      ) {
+        wentOut = true;
+      }
+    }
+
+    expect(wentOut).toBe(true);
+    expect(sim.storedWare(PLAYER, Ware.Fish)).toBeGreaterThan(before);
+  });
+
+  it('only fishes where a settler can actually stand', () => {
+    const sim = newGame();
+    const id = buildFishery(sim)!;
+    run(sim, 9000);
+
+    const hut = sim.buildings.require(id);
+    // Every shoal that has been worked was somewhere reachable on foot; open
+    // water the fisherman could never reach must be untouched.
+    for (const point of sim.world.grid.pointsWithin(hut.point, 6)) {
+      if (sim.world.resource[point] !== Resource.Fish) continue;
+      if (sim.world.isWalkable(point)) continue;
+      expect(sim.world.resourceAmount[point]).toBeGreaterThan(0);
+    }
+  });
+
+  it('reports an exhausted fishery once the shoals are gone', () => {
+    const sim = newGame();
+    const id = buildFishery(sim)!;
+    run(sim, 3000);
+
+    const hut = sim.buildings.require(id);
+    for (const point of sim.world.grid.pointsWithin(hut.point, 8)) {
+      if (sim.world.resource[point] === Resource.Fish) sim.world.resource[point] = Resource.None;
+    }
+    run(sim, 1500);
+
+    expect(hut.status).toBe(BuildingStatus.Exhausted);
+  });
+
+  it('keeps the well digger at his well', () => {
+    // Extraction with no radius happens where the building stands, so this one
+    // must not have picked up the fisherman's wandering.
+    const sim = newGame();
+    const id = buildAndConnect(sim, BuildingType.Well)!;
+    run(sim, 4000);
+
+    const well = sim.buildings.require(id);
+    expect(well.state).toBe(BuildingState.Complete);
+    expect(sim.storedWare(PLAYER, Ware.Water)).toBeGreaterThan(0);
+
+    const digger = sim.settlers.get(well.worker);
+    expect(digger?.state).toBe(SettlerState.AtWork);
+  });
+});
+
+describe('removing a road on its own', () => {
+  it('takes the road but leaves both its flags standing', () => {
+    const sim = newGame();
+    buildAndConnect(sim, BuildingType.Woodcutter, MapObject.Tree);
+    run(sim, 1200);
+
+    const road = sim.roads.all()[0]!;
+    const ends = [road.fromFlag, road.toFlag];
+    const middle = road.points[1]!;
+
+    expect(sim.demolishRoad(PLAYER, middle).ok).toBe(true);
+
+    expect(sim.roads.count).toBe(0);
+    for (const flagId of ends) expect(sim.flags.has(flagId)).toBe(true);
+    // The map no longer shows a road running through that point.
+    expect(sim.world.roadCount(middle)).toBe(0);
+  });
+
+  it('leaves the other roads at a junction alone', () => {
+    const sim = newGame();
+    buildAndConnect(sim, BuildingType.Woodcutter, MapObject.Tree);
+    buildAndConnect(sim, BuildingType.Sawmill);
+    run(sim, 1200);
+
+    expect(sim.roads.count).toBe(2);
+    const [first, second] = sim.roads.all();
+
+    expect(sim.demolishRoad(PLAYER, first!.points[1]!).ok).toBe(true);
+
+    expect(sim.roads.count).toBe(1);
+    expect(sim.roads.all()[0]!.points).toEqual(second!.points);
+  });
+
+  it('says so when there is no road there', () => {
+    const sim = newGame();
+    const result = sim.demolishRoad(PLAYER, headquarters(sim).point);
+    expect(result.ok).toBe(false);
+  });
+});
+
+describe('roads and building sites', () => {
+  it('offers at most a flag where a road already runs', () => {
+    const sim = newGame();
+    buildAndConnect(sim, BuildingType.Woodcutter, MapObject.Tree);
+
+    const road = sim.roads.all()[0]!;
+    for (let i = 1; i < road.points.length - 1; i += 1) {
+      const point = road.points[i]!;
+      const space = evaluateBuildSpace(sim.world, point, PLAYER);
+      expect(space).toBeLessThanOrEqual(BuildSpace.Flag);
+      expect(canHostSize(space, BuildingSize.Hut)).toBe(false);
+    }
+  });
+
+  it('refuses to put a building on top of a road', () => {
+    const sim = newGame();
+    buildAndConnect(sim, BuildingType.Woodcutter, MapObject.Tree);
+
+    const road = sim.roads.all()[0]!;
+    const onRoad = road.points[Math.floor(road.points.length / 2)]!;
+
+    expect(sim.placeBuilding(PLAYER, onRoad, BuildingType.Quarry).ok).toBe(false);
+    expect(sim.world.building[onRoad]).toBe(0);
+  });
+});
+
+describe('drawing between ticks', () => {
+  it('advances a walking settler part way through the coming tick', () => {
+    // A tick is 150ms of real time at the normal pace, so a settler that only
+    // moved when a tick landed would visibly stutter. The renderer asks for a
+    // position part way into the next tick instead.
+    const sim = newGame();
+    buildAndConnect(sim, BuildingType.Woodcutter, MapObject.Tree);
+
+    let walker: ReturnType<typeof sim.settlers.get>;
+    for (let i = 0; i < 3000 && !walker; i += 1) {
+      sim.update();
+      walker = sim.settlers.all().find((settler) => settler.fromPoint !== settler.toPoint);
+    }
+
+    expect(walker).toBeDefined();
+    const settler = walker!;
+
+    const atTick = sim.stepFraction(settler, 0);
+    const halfWay = sim.stepFraction(settler, 0.5);
+
+    expect(halfWay).toBeGreaterThan(atTick);
+    // Never past the end of the step, whatever the frame timing.
+    expect(sim.stepFraction(settler, 1)).toBeLessThanOrEqual(1);
+    expect(sim.stepFraction(settler, 0)).toBe(settler.stepProgress / settler.stepLength);
+  });
+
+  it('defaults to the tick boundary when no fraction is given', () => {
+    const sim = newGame();
+    buildAndConnect(sim, BuildingType.Woodcutter, MapObject.Tree);
+    run(sim, 900);
+
+    for (const settler of sim.settlers.all()) {
+      expect(sim.stepFraction(settler)).toBe(sim.stepFraction(settler, 0));
+    }
   });
 });

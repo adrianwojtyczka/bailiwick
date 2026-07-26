@@ -1,6 +1,16 @@
 import { TICKS_PER_SECOND } from '../sim/simulation';
 
 /**
+ * How fast game time runs against real time at normal speed.
+ *
+ * The tick is the unit of game time and every duration in the game is measured
+ * in ticks, so pacing the whole game is a matter of deciding how much real time
+ * one tick takes rather than rebalancing every building. Turn this one number
+ * up to make the game brisker.
+ */
+export const BASE_SPEED = 1 / 3;
+
+/**
  * Fixed-timestep game loop.
  *
  * The simulation always advances in whole ticks of the same size, whatever the
@@ -13,7 +23,7 @@ import { TICKS_PER_SECOND } from '../sim/simulation';
  */
 export class GameLoop {
   private readonly step: () => void;
-  private readonly draw: () => void;
+  private readonly draw: (alpha: number) => void;
 
   private running = false;
   private frame = 0;
@@ -21,10 +31,10 @@ export class GameLoop {
   private accumulator = 0;
   private speed = 1;
 
-  /** Ticks per second at speed 1. */
-  private readonly tickMs = 1000 / TICKS_PER_SECOND;
+  /** Real milliseconds one tick occupies at speed 1. */
+  private readonly tickMs = 1000 / (TICKS_PER_SECOND * BASE_SPEED);
 
-  constructor(step: () => void, draw: () => void) {
+  constructor(step: () => void, draw: (alpha: number) => void) {
     this.step = step;
     this.draw = draw;
   }
@@ -76,7 +86,10 @@ export class GameLoop {
     // than spiral into ever longer frames.
     if (steps >= MAX_STEPS_PER_FRAME) this.accumulator = 0;
 
-    this.draw();
+    // How far into the next tick the frame falls. Handing this to the renderer
+    // lets it draw between ticks, so movement stays smooth however few ticks a
+    // second the current pace calls for.
+    this.draw(Math.min(1, this.accumulator / this.tickMs));
     this.frame = requestAnimationFrame(this.tick);
   };
 }

@@ -13,6 +13,8 @@ export interface ViewState {
   readonly roadPreview: readonly number[] | null;
   /** When set, every point that could take this footprint is marked. */
   readonly buildSpaceOverlay: BuildingSize | null;
+  /** How far the frame falls into the tick still to come, 0..1. */
+  readonly alpha: number;
 }
 
 /**

@@ -11,7 +11,7 @@ import type { BuildingSize } from '../sim/world/buildspace';
 import { el } from '../ui/dom';
 import { Hud } from '../ui/hud';
 import { attachGestures } from '../ui/input/gestures';
-import { GameLoop } from './loop';
+import { BASE_SPEED, GameLoop } from './loop';
 
 /** How the next tap on the map will be interpreted. */
 type Mode =
@@ -19,8 +19,13 @@ type Mode =
   | { readonly kind: 'build'; readonly type: BuildingType }
   | { readonly kind: 'road'; readonly from: number };
 
-/** Game ticks between automatic saves — about every two minutes of play. */
-const AUTOSAVE_INTERVAL = TICKS_PER_SECOND * 120;
+/**
+ * Ticks between automatic saves — about every two minutes of real time.
+ *
+ * Measured against the pace the game actually runs at, so changing that pace
+ * does not quietly change how often the player's progress is kept.
+ */
+const AUTOSAVE_INTERVAL = Math.round(TICKS_PER_SECOND * BASE_SPEED * 120);
 
 /** How long a message stays in the ticker, in frames at 60fps. */
 const NOTICE_FRAMES = 240;
@@ -76,6 +81,7 @@ export class GameSession {
       cancelMode: () => this.cancel(),
       demolishBuilding: (point) => this.run(() => simulation.demolishBuilding(playerId, point)),
       demolishFlag: (point) => this.run(() => simulation.demolishFlag(playerId, point)),
+      demolishRoad: (point) => this.run(() => simulation.demolishRoad(playerId, point)),
       startRoad: (point) => {
         this.mode = { kind: 'road', from: point };
         this.roadPreview = null;
@@ -90,7 +96,7 @@ export class GameSession {
 
     this.loop = new GameLoop(
       () => this.step(),
-      () => this.draw(),
+      (alpha) => this.draw(alpha),
     );
 
     this.detachGestures = attachGestures(this.canvas, {
@@ -137,7 +143,7 @@ export class GameSession {
     if (this.simulation.tick % AUTOSAVE_INTERVAL === 0) void this.autosave();
   }
 
-  private draw(): void {
+  private draw(alpha: number): void {
     if (this.noticeFrames > 0) {
       this.noticeFrames -= 1;
       if (this.noticeFrames === 0) this.notice = null;
@@ -149,6 +155,7 @@ export class GameSession {
       buildPreview: this.buildPreview(),
       roadPreview: this.roadPreview,
       buildSpaceOverlay: this.overlaySize(),
+      alpha,
     };
 
     this.renderer.render(view);

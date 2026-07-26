@@ -85,6 +85,12 @@ export interface SimulationOptions {
   readonly players: readonly PlayerConfig[];
 }
 
+/** The behaviours whose worker leaves the building to do the work. */
+type FieldWork = Extract<
+  BuildingInfo['behaviour'],
+  { kind: 'harvest' } | { kind: 'plant' } | { kind: 'extract' }
+>;
+
 /** Bumped whenever the shape of a saved game changes. */
 export const SAVE_VERSION = 1;
 
@@ -730,10 +736,16 @@ export class Simulation {
     return false;
   }
 
-  /** How far along the current step a settler is, for smooth rendering. */
-  stepFraction(settler: Settler): number {
+  /**
+   * How far along its current step a settler is, for smooth rendering.
+   *
+   * `alpha` is how far the frame falls into the tick still to come. Without it
+   * a settler would only move when a tick lands, which at a leisurely pace
+   * would read as a stutter rather than a walk.
+   */
+  stepFraction(settler: Settler, alpha = 0): number {
     if (settler.stepLength <= 0) return 0;
-    return Math.min(1, settler.stepProgress / settler.stepLength);
+    return Math.min(1, (settler.stepProgress + alpha) / settler.stepLength);
   }
 
   // -------------------------------------------------------------- settlers
@@ -832,6 +844,7 @@ export class Simulation {
     if (!building) return 1;
     const behaviour = buildingInfo(building.type).behaviour;
     if (behaviour.kind === 'harvest' || behaviour.kind === 'plant') return behaviour.workTicks;
+    if (behaviour.kind === 'extract') return behaviour.workTicks;
     return 60;
   }
 
@@ -863,6 +876,15 @@ export class Simulation {
         this.world.object[point] = MapObject.Tree;
         this.world.objectData[point] = 0;
         this.growingTrees.push(point);
+      }
+    } else if (behaviour.kind === 'extract') {
+      if (this.world.resource[point] === behaviour.resource && this.world.resourceAmount[point]! > 0) {
+        if (behaviour.depletes) {
+          const remaining = this.world.resourceAmount[point]! - 1;
+          this.world.resourceAmount[point] = Math.max(0, remaining);
+          if (remaining <= 0) this.world.resource[point] = Resource.None;
+        }
+        settler.carrying = behaviour.output;
       }
     }
 
@@ -1120,7 +1142,11 @@ export class Simulation {
         this.updateFieldWork(building, behaviour);
         return;
       case 'extract':
-        this.updateExtraction(building, behaviour);
+        // A well is sunk where it stands and a mine works its own shaft, but a
+        // fisherman has to walk to the water. The work radius is what tells
+        // them apart.
+        if (behaviour.radius > 0) this.updateFieldWork(building, behaviour);
+        else this.updateExtraction(building, behaviour);
         return;
       case 'craft':
         this.updateCraft(building, behaviour);
@@ -1209,20 +1235,16 @@ export class Simulation {
     this.note(`${info.name} completed.`);
   }
 
-  private updateFieldWork(
-    building: Building,
-    behaviour: Extract<
-      ReturnType<typeof buildingInfo>['behaviour'],
-      { kind: 'harvest' } | { kind: 'plant' }
-    >,
-  ): void {
+  private updateFieldWork(building: Building, behaviour: FieldWork): void {
     const worker = this.settlers.get(building.worker);
     if (!worker || worker.state !== SettlerState.AtWork) return;
 
     const target =
       behaviour.kind === 'harvest'
         ? this.findObject(building.point, behaviour.radius, behaviour.object)
-        : this.findPlantingSpot(building.point, behaviour.radius);
+        : behaviour.kind === 'extract'
+          ? this.findResource(building.point, behaviour.radius, behaviour.resource, true)
+          : this.findPlantingSpot(building.point, behaviour.radius);
 
     if (target === undefined) {
       building.status = BuildingStatus.Exhausted;
@@ -1627,11 +1649,25 @@ export class Simulation {
     return undefined;
   }
 
-  private findResource(centre: number, radius: number, resource: Resource): number | undefined {
+  /**
+   * The nearest point within `radius` still holding the given resource.
+   *
+   * A fisherman has to stand somewhere to cast, and the nearest shoal is often
+   * open water he cannot reach; `reachable` restricts the search to ground a
+   * settler can actually occupy. Wells and mines work where they stand and do
+   * not care.
+   */
+  private findResource(
+    centre: number,
+    radius: number,
+    resource: Resource,
+    reachable = false,
+  ): number | undefined {
     for (const point of this.world.grid.pointsWithin(centre, radius)) {
-      if (this.world.resource[point] === resource && this.world.resourceAmount[point]! > 0) {
-        return point;
-      }
+      if (this.world.resource[point] !== resource) continue;
+      if (this.world.resourceAmount[point]! <= 0) continue;
+      if (reachable && !this.world.isWalkable(point)) continue;
+      return point;
     }
     return undefined;
   }

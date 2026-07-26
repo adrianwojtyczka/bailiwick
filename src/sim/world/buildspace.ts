@@ -141,6 +141,10 @@ export function evaluateBuildSpace(world: World, point: number, player: number):
 
   // A lone flag is allowed right up to the border; buildings are not.
   const flagPossible = canPlaceFlag(world, point, player);
+
+  // A road already runs through here. A flag is still welcome — it divides the
+  // road in two — but a building would leave carriers walking through its walls.
+  if (world.roadCount(point) > 0) return flagPossible ? BuildSpace.Flag : BuildSpace.None;
   if (!isWellInsideTerritory(world, point, player)) {
     return flagPossible ? BuildSpace.Flag : BuildSpace.None;
   }
