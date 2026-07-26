@@ -107,6 +107,8 @@ export const BuildingStatus = {
   /** The output has nowhere to go because the flag outside is full. */
   Blocked: 4,
   UnderConstruction: 5,
+  /** No road links this to a store, so nothing can ever reach it. */
+  Unreachable: 6,
 } as const;
 
 export type BuildingStatus = (typeof BuildingStatus)[keyof typeof BuildingStatus];

@@ -111,8 +111,12 @@ test('a woodcutter can be placed and starts building', async ({ page }) => {
   // Away from the headquarters, which occupies the centre.
   expect(await tapUntilAccepted(page)).toBe(true);
 
-  // The site is selected after placing, and reports itself as a site.
-  await expect(page.locator('.panel__status')).toContainText('Under construction');
+  // The site is selected after placing. Until a road reaches it, it reports
+  // that rather than a bare "under construction" — the road is the next thing
+  // the player has to do.
+  await expect(page.locator('.panel__status')).toHaveText(
+    /Under construction|No road connects this to your network/,
+  );
 });
 
 test('tapping the headquarters describes it', async ({ page }) => {

@@ -338,7 +338,81 @@ export class Simulation {
 
     this.world.flag[point] = flag.id;
     this.network.invalidate();
+
+    // A flag raised on an existing road divides it in two.
+    this.splitRoadAt(flag);
+
     return flag;
+  }
+
+  /**
+   * Splits the road running through a newly raised flag into two stretches.
+   *
+   * This is what makes a flag mean anything in the middle of a road. Carriers
+   * work one stretch each, so dividing a long haul at a flag puts a second
+   * settler on the second half and shortens both their walks — and, just as
+   * importantly, the new flag becomes a real node in the network that further
+   * roads can branch from. Without this the flag would be an island: nothing
+   * would connect through it, and anything built beyond it would sit
+   * unreachable, never receiving a builder or a single board.
+   *
+   * The map itself is untouched. The same lattice edges are still roads; only
+   * the entities describing them change.
+   */
+  private splitRoadAt(flag: Flag): void {
+    const road = this.roads.find((candidate) => {
+      const index = candidate.points.indexOf(flag.point);
+      return index > 0 && index < candidate.points.length - 1;
+    });
+    if (!road) return;
+
+    const index = road.points.indexOf(flag.point);
+    const carrier = this.settlers.get(road.carrier);
+    const retired = road.id;
+
+    for (const endFlag of [road.fromFlag, road.toFlag]) {
+      const end = this.flags.get(endFlag);
+      if (!end) continue;
+      const at = end.roads.indexOf(road.id);
+      if (at >= 0) end.roads.splice(at, 1);
+    }
+    this.roads.remove(road.id);
+
+    // Send home anyone still walking out to the road that has just gone, and do
+    // it before the halves exist: entity ids are recycled, so a new road can be
+    // handed the very id the old one just gave up.
+    this.settlers.forEach((settler) => {
+      if (settler.road === retired && settler.id !== carrier?.id) this.dismissSettler(settler.id);
+    });
+
+    const first = this.createRoad(
+      road.owner,
+      road.points.slice(0, index + 1),
+      road.fromFlag,
+      flag.id,
+    );
+    const second = this.createRoad(road.owner, road.points.slice(index), flag.id, road.toFlag);
+
+    if (carrier) {
+      // The carrier keeps the half it is standing on; `updateRoads` sends a
+      // second settler out to the other half on the next tick.
+      const half = first.points.includes(carrier.point) ? first : second;
+      half.carrier = carrier.id;
+      half.carrierRequested = false;
+      carrier.road = half.id;
+
+      if (carrier.carrying !== null) {
+        // The new flag is an endpoint of both halves, so it is always a legal
+        // place to hand the crate over; routing takes it onward from there.
+        carrier.state = SettlerState.CarrierDelivering;
+        carrier.taskPoint = flag.id;
+        this.setPath(carrier, this.pathAlongRoad(half, carrier.point, flag.point) ?? []);
+        if (carrier.path.length === 0) this.deliverWare(carrier);
+      } else {
+        carrier.state = SettlerState.CarrierWaiting;
+        this.setPath(carrier, []);
+      }
+    }
   }
 
   private createRoad(player: number, points: number[], fromFlag: number, toFlag: number): Road {
@@ -458,14 +532,104 @@ export class Simulation {
   }
 
   private destroyFlag(flag: Flag): void {
-    for (const roadId of [...flag.roads]) {
-      const road = this.roads.get(roadId);
-      if (road) this.destroyRoad(road);
+    // A flag with a road on either side is a staging post, not a junction:
+    // removing it should join the two stretches back together rather than tear
+    // both down and cut off everything beyond.
+    if (!this.mergeRoadsAt(flag)) {
+      for (const roadId of [...flag.roads]) {
+        const road = this.roads.get(roadId);
+        if (road) this.destroyRoad(road);
+      }
     }
 
     this.world.flag[flag.point] = 0;
     this.flags.remove(flag.id);
     this.network.invalidate();
+  }
+
+  /**
+   * Rejoins the two roads meeting at a flag that is being removed — the
+   * counterpart of `splitRoadAt`.
+   *
+   * Returns false, leaving the roads alone, when the flag is anything other
+   * than a simple staging post between exactly two stretches.
+   */
+  private mergeRoadsAt(flag: Flag): boolean {
+    if (flag.building !== 0 || flag.roads.length !== 2) return false;
+
+    const first = this.roads.get(flag.roads[0]!);
+    const second = this.roads.get(flag.roads[1]!);
+    if (!first || !second || first.id === second.id) return false;
+
+    // Orient the first stretch to end at the flag and the second to start
+    // there, so the two point lists splice into one continuous road.
+    const leading = first.toFlag === flag.id ? first.points : [...first.points].reverse();
+    const leadingFar = first.toFlag === flag.id ? first.fromFlag : first.toFlag;
+    const trailing = second.fromFlag === flag.id ? second.points : [...second.points].reverse();
+    const trailingFar = second.fromFlag === flag.id ? second.toFlag : second.fromFlag;
+
+    // A road from a flag back to itself is not a road.
+    if (leadingFar === trailingFar) return false;
+
+    // One stretch now needs one carrier; the spare goes back to the store.
+    const keep = this.settlers.get(first.carrier) ?? this.settlers.get(second.carrier);
+    const retired = [first.id, second.id];
+
+    for (const road of [first, second]) {
+      for (const endFlag of [road.fromFlag, road.toFlag]) {
+        const end = this.flags.get(endFlag);
+        if (!end) continue;
+        const at = end.roads.indexOf(road.id);
+        if (at >= 0) end.roads.splice(at, 1);
+      }
+      this.roads.remove(road.id);
+    }
+
+    // Both the spare carrier and anyone still walking out go home now, before
+    // the merged road can be handed one of the ids just given up.
+    this.settlers.forEach((settler) => {
+      if (retired.includes(settler.road) && settler.id !== keep?.id) {
+        this.dismissSettler(settler.id);
+      }
+    });
+
+    const merged = this.createRoad(
+      first.owner,
+      [...leading, ...trailing.slice(1)],
+      leadingFar,
+      trailingFar,
+    );
+
+    if (keep) {
+      merged.carrier = keep.id;
+      keep.road = merged.id;
+      keep.state = SettlerState.CarrierWaiting;
+      this.setPath(keep, []);
+
+      if (keep.carrying !== null) {
+        // Deliver to whichever end of the joined road is nearer, then let
+        // ordinary routing carry the crate on from there.
+        const at = merged.points.indexOf(keep.point);
+        const towardsStart = at >= 0 && at * 2 <= merged.points.length;
+        const target = towardsStart ? merged.fromFlag : merged.toFlag;
+        const targetFlag = this.flags.get(target);
+        if (targetFlag) {
+          keep.state = SettlerState.CarrierDelivering;
+          keep.taskPoint = target;
+          this.setPath(keep, this.pathAlongRoad(merged, keep.point, targetFlag.point) ?? []);
+          if (keep.path.length === 0) this.deliverWare(keep);
+        }
+      }
+    }
+
+    // Crates waiting at the flag being removed move onto the joined road.
+    for (const parcel of flag.wares) {
+      const host = this.flags.get(merged.fromFlag) ?? this.flags.get(merged.toFlag);
+      if (host && host.wares.length < FLAG_CAPACITY) host.wares.push(parcel);
+    }
+    flag.wares.length = 0;
+
+    return true;
   }
 
   private destroyRoad(road: Road): void {
@@ -490,14 +654,31 @@ export class Simulation {
     this.network.invalidate();
   }
 
-  /** Sends a settler back into the nearest store, or simply removes it. */
+  /** Sends a settler back into the nearest store. */
   private dismissSettler(settlerId: number): void {
     const settler = this.settlers.get(settlerId);
     if (!settler) return;
 
     // Whatever was in hand falls where the settler stood.
     settler.carrying = null;
-    this.settlers.remove(settlerId);
+    this.sendHome(settler);
+  }
+
+  /**
+   * Returns a settler to a store, along with the tool of its trade.
+   *
+   * Settlers are not consumed by taking a job: remodelling a road network or
+   * demolishing a building hands the people back, and their tools with them.
+   * Losing either would slowly starve a long game of both.
+   */
+  private sendHome(settler: Settler): void {
+    const store = this.storeFor(settler.owner);
+    if (store) {
+      store.reserve += 1;
+      const tool = professionInfo(settler.profession).tool;
+      if (tool !== null) store.stock[tool] = (store.stock[tool] ?? 0) + 1;
+    }
+    this.settlers.remove(settler.id);
   }
 
   private claimTerritory(centre: number, radius: number, player: number): void {
@@ -717,11 +898,9 @@ export class Simulation {
     settler.building = 0;
     settler.road = 0;
     settler.carrying = null;
-    // The builder simply melts back into the population; tracking a walk home
-    // would cost more than it adds.
-    const store = this.storeFor(settler.owner);
-    if (store) store.reserve += 1;
-    this.settlers.remove(settler.id);
+    // The builder melts back into the population, hammer and all; tracking the
+    // walk home would cost more than it adds.
+    this.sendHome(settler);
   }
 
   // -------------------------------------------------------------- carriers
@@ -839,8 +1018,7 @@ export class Simulation {
 
     // Re-check the route: the network may have changed while walking.
     if (this.nextFlagFor(flag.id, parcel) === undefined && !this.isAcceptableHere(flag, parcel)) {
-      const replacement = this.retarget(flag, parcel.ware);
-      if (replacement !== undefined) parcel.destination = replacement;
+      this.retarget(flag, parcel);
     }
 
     flag.wares.push(parcel);
@@ -868,7 +1046,7 @@ export class Simulation {
       for (const parcel of flag.wares) {
         if (this.nextFlagFor(flag.id, parcel) !== undefined) continue;
         if (this.isAcceptableHere(flag, parcel)) continue;
-        parcel.destination = this.retarget(flag, parcel.ware) ?? parcel.destination;
+        this.retarget(flag, parcel);
       }
     });
   }
@@ -907,6 +1085,8 @@ export class Simulation {
   }
 
   private updateBuilding(building: Building): void {
+    this.forgetLostWorker(building);
+
     if (building.state === BuildingState.UnderConstruction) {
       this.updateConstruction(building);
       return;
@@ -922,7 +1102,9 @@ export class Simulation {
 
     // Anything else needs somebody to work it.
     if (building.worker === 0) {
-      building.status = BuildingStatus.AwaitingWorker;
+      building.status = this.storeReaches(building)
+        ? BuildingStatus.AwaitingWorker
+        : BuildingStatus.Unreachable;
       this.requestWorker(building, info);
       return;
     }
@@ -949,17 +1131,59 @@ export class Simulation {
   }
 
   private updateConstruction(building: Building): void {
-    building.status = BuildingStatus.UnderConstruction;
-
     // A site with nothing left to do finishes even without a builder present.
     if (buildingInfo(building.type).buildTicks === 0 && this.hasAllMaterials(building)) {
       this.completeConstruction(building);
       return;
     }
 
+    // A site no road reaches will never see a builder or a board. Saying so is
+    // far kinder than leaving the player staring at a scaffold that never
+    // changes, wondering what they did wrong.
+    if (!this.storeReaches(building)) {
+      building.status = BuildingStatus.Unreachable;
+      return;
+    }
+
+    building.status = BuildingStatus.UnderConstruction;
+
     if (building.worker === 0 && !building.workerRequested) {
       this.requestBuilder(building);
     }
+  }
+
+  /**
+   * Clears a worker that no longer exists.
+   *
+   * `requestBuilder` records the settler it sent out, and nothing else asks for
+   * one while that record stands. If the settler is dismissed on the way — its
+   * road torn up, say — the record would otherwise pin the building forever.
+   */
+  private forgetLostWorker(building: Building): void {
+    if (building.worker === 0) return;
+    if (this.settlers.has(building.worker)) return;
+
+    building.worker = 0;
+    building.workerRequested = false;
+  }
+
+  /** Whether any of the player's stores can reach this building by road. */
+  private storeReaches(building: Building): boolean {
+    const flagId = this.world.flag[building.flagPoint];
+    if (!flagId) return false;
+
+    let reachable = false;
+    this.buildings.forEach((candidate) => {
+      if (reachable || candidate.owner !== building.owner || !isStore(candidate)) return;
+
+      const storeFlag = this.world.flag[candidate.flagPoint];
+      if (!storeFlag) return;
+      if (storeFlag === flagId || this.network.cost(storeFlag, flagId) !== undefined) {
+        reachable = true;
+      }
+    });
+
+    return reachable;
   }
 
   private hasAllMaterials(building: Building): boolean {
@@ -1168,6 +1392,43 @@ export class Simulation {
     }
   }
 
+  /**
+   * Cancels a reservation made by `reserveIncoming`.
+   *
+   * Every ware that stops being on its way somewhere has to give its place
+   * back. A reservation left behind counts against the building for good:
+   * `outstandingDemand` subtracts it, so the building looks satisfied, nothing
+   * more is ever sent, and a construction site quietly waits forever.
+   */
+  private releaseIncoming(buildingId: number, ware: Ware): void {
+    const building = this.buildings.get(buildingId);
+    if (!building) return;
+
+    if (building.state === BuildingState.UnderConstruction) {
+      const cost = buildingInfo(building.type).cost;
+      for (let i = 0; i < cost.length; i += 1) {
+        if (cost[i]!.ware !== ware || building.incoming[i]! <= 0) continue;
+        building.incoming[i] = building.incoming[i]! - 1;
+        return;
+      }
+      return;
+    }
+
+    const behaviour = buildingInfo(building.type).behaviour;
+    if (behaviour.kind === 'craft') {
+      for (let i = 0; i < behaviour.inputs.length; i += 1) {
+        if (behaviour.inputs[i]!.ware !== ware || building.inputsIncoming[i]! <= 0) continue;
+        building.inputsIncoming[i] = building.inputsIncoming[i]! - 1;
+        return;
+      }
+      return;
+    }
+
+    if (behaviour.kind === 'extract' && behaviour.food?.includes(ware)) {
+      building.inputsIncoming[0] = Math.max(0, (building.inputsIncoming[0] ?? 0) - 1);
+    }
+  }
+
   /** Takes a delivered ware into a building's stock. */
   private receiveWare(building: Building, ware: Ware): void {
     if (building.state === BuildingState.UnderConstruction) {
@@ -1204,26 +1465,41 @@ export class Simulation {
     }
   }
 
-  /** Finds a fresh destination for a ware whose target has gone. */
-  private retarget(flag: Flag, ware: Ware): number | undefined {
+  /**
+   * Points a ware at a fresh destination, releasing its old reservation first
+   * so the building it was bound for does not go on counting it as incoming.
+   *
+   * Returns false when nowhere will take it, leaving the parcel as it was.
+   */
+  private retarget(flag: Flag, parcel: WareParcel): boolean {
+    this.releaseIncoming(parcel.destination, parcel.ware);
+
     const destination = chooseDestination(
       this.buildings,
       this.network,
       flag.id,
-      ware,
+      parcel.ware,
       flag.owner,
       (candidate) => this.world.flag[candidate.flagPoint] ?? 0,
     );
-    if (!destination) return undefined;
-    this.reserveIncoming(destination.building, ware);
-    return destination.building;
+
+    if (!destination) {
+      // Nothing wants it anywhere reachable; put the reservation back so the
+      // books stay straight and try again on the next sweep.
+      this.reserveIncoming(parcel.destination, parcel.ware);
+      return false;
+    }
+
+    this.reserveIncoming(destination.building, parcel.ware);
+    parcel.destination = destination.building;
+    return true;
   }
 
   private retargetWaresBoundFor(buildingId: number): void {
     this.flags.forEach((flag) => {
       for (const parcel of flag.wares) {
         if (parcel.destination !== buildingId) continue;
-        parcel.destination = this.retarget(flag, parcel.ware) ?? 0;
+        if (!this.retarget(flag, parcel)) parcel.destination = 0;
       }
     });
 

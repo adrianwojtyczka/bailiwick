@@ -4,7 +4,7 @@ import { Ware } from './data/wares';
 import { BuildingState, BuildingStatus, FLAG_CAPACITY } from './entities/types';
 import { Simulation } from './simulation';
 import { planRoad } from './transport/pathfinding';
-import { BuildSpace, canHostSize, evaluateBuildSpace } from './world/buildspace';
+import { BuildSpace, canHostSize, canPlaceFlag, evaluateBuildSpace } from './world/buildspace';
 import { MapObject } from './world/terrain';
 
 const PLAYER = 1;
@@ -343,5 +343,222 @@ describe('building status', () => {
     run(sim, 600);
 
     expect(building.status).toBe(BuildingStatus.Exhausted);
+  });
+});
+
+describe('flags placed on an existing road', () => {
+  /**
+   * A point partway along a road where a flag is actually allowed.
+   *
+   * The interior points next to either end are ruled out by the no-adjacent-
+   * flags rule, so the first legal one is found by asking.
+   */
+  function midRoadPoint(sim: Simulation): number | undefined {
+    for (const road of sim.roads.all()) {
+      for (let i = 1; i < road.points.length - 1; i += 1) {
+        if (canPlaceFlag(sim.world, road.points[i]!, PLAYER)) return road.points[i]!;
+      }
+    }
+    return undefined;
+  }
+
+  /** A game with one long road out to a woodcutter, carriers already at work. */
+  function gameWithARoad(): Simulation {
+    const sim = newGame();
+    buildAndConnect(sim, BuildingType.Woodcutter, MapObject.Tree);
+    buildAndConnect(sim, BuildingType.Sawmill);
+    run(sim, 2500);
+    return sim;
+  }
+
+  it('splits the road in two at the new flag', () => {
+    const sim = gameWithARoad();
+    const point = midRoadPoint(sim)!;
+    expect(point).toBeDefined();
+
+    const crossed = sim.roads.all().find((road) => road.points.includes(point))!;
+    const ends = [crossed.fromFlag, crossed.toFlag];
+    const roadsBefore = sim.roads.count;
+
+    expect(sim.placeFlag(PLAYER, point).ok).toBe(true);
+
+    expect(sim.roads.count).toBe(roadsBefore + 1);
+
+    const flag = sim.flags.require(sim.world.flag[point]!);
+    expect(flag.roads).toHaveLength(2);
+
+    // The two halves run from the original ends to the new flag.
+    const halves = flag.roads.map((id) => sim.roads.require(id));
+    const far = halves.map((road) => (road.fromFlag === flag.id ? road.toFlag : road.fromFlag));
+    expect(far.sort()).toEqual([...ends].sort());
+    // Between them the halves cover the original run, meeting at the new flag.
+    expect(halves[0]!.points.length + halves[1]!.points.length).toBe(crossed.points.length + 1);
+    for (const half of halves) {
+      expect(half.points.length).toBeGreaterThan(1);
+      expect([half.points[0], half.points[half.points.length - 1]]).toContain(point);
+    }
+  });
+
+  it('keeps the far end reachable through the new flag', () => {
+    const sim = gameWithARoad();
+    const hqFlag = sim.world.flag[headquarters(sim).flagPoint]!;
+
+    const point = midRoadPoint(sim)!;
+    const crossed = sim.roads.all().find((road) => road.points.includes(point))!;
+    const farFlag = crossed.fromFlag === hqFlag ? crossed.toFlag : crossed.fromFlag;
+
+    sim.placeFlag(PLAYER, point);
+
+    expect(sim.network.cost(hqFlag, farFlag)).toBeDefined();
+    expect(sim.network.cost(hqFlag, sim.world.flag[point]!)).toBeDefined();
+  });
+
+  it('puts a carrier on each half', () => {
+    const sim = gameWithARoad();
+    const point = midRoadPoint(sim)!;
+    sim.placeFlag(PLAYER, point);
+
+    // The second carrier has to walk out from the store first.
+    run(sim, 900);
+
+    const flag = sim.flags.require(sim.world.flag[point]!);
+    for (const id of flag.roads) {
+      const half = sim.roads.require(id);
+      expect(half.carrier).toBeGreaterThan(0);
+      expect(sim.settlers.require(half.carrier).road).toBe(half.id);
+    }
+  });
+
+  it('leaves nothing standing on a road that no longer exists', () => {
+    const sim = gameWithARoad();
+    sim.placeFlag(PLAYER, midRoadPoint(sim)!);
+    run(sim, 900);
+
+    sim.settlers.forEach((settler) => {
+      if (settler.road === 0) return;
+      expect(sim.roads.has(settler.road)).toBe(true);
+    });
+  });
+
+  it('builds what is connected through the new flag', () => {
+    // The reported bug: a quarry and a second woodcutter, both reached only by
+    // roads branching off a flag the player added partway along an old one,
+    // sat as scaffolds for good while the store was full of boards.
+    const sim = gameWithARoad();
+    const junction = midRoadPoint(sim)!;
+    expect(sim.placeFlag(PLAYER, junction).ok).toBe(true);
+
+    const built: number[] = [];
+    for (const type of [BuildingType.Quarry, BuildingType.Woodcutter]) {
+      const site = siteFor(sim, type, type === BuildingType.Quarry ? MapObject.Stone : MapObject.Tree);
+      if (site === undefined) continue;
+      if (!sim.placeBuilding(PLAYER, site, type).ok) continue;
+
+      const building = sim.buildings.find((candidate) => candidate.point === site)!;
+      const route = planRoad(sim.world, junction, building.flagPoint, PLAYER);
+      if (route) sim.placeRoad(PLAYER, route);
+      built.push(building.id);
+    }
+
+    expect(built.length).toBeGreaterThan(0);
+    run(sim, 9000);
+
+    for (const id of built) {
+      expect(sim.buildings.require(id).state).toBe(BuildingState.Complete);
+    }
+  });
+
+  it('joins the halves back together when the flag is removed', () => {
+    const sim = gameWithARoad();
+    const point = midRoadPoint(sim)!;
+
+    const crossed = sim.roads.all().find((road) => road.points.includes(point))!;
+    const originalLength = crossed.points.length;
+    const ends = [crossed.fromFlag, crossed.toFlag].sort();
+
+    sim.placeFlag(PLAYER, point);
+    run(sim, 400);
+    expect(sim.roads.count).toBe(3);
+
+    expect(sim.demolishFlag(PLAYER, point).ok).toBe(true);
+
+    expect(sim.roads.count).toBe(2);
+    expect(sim.world.flag[point]).toBe(0);
+
+    const rejoined = sim.roads.all().find((road) => road.points.includes(point))!;
+    expect(rejoined.points).toHaveLength(originalLength);
+    expect([rejoined.fromFlag, rejoined.toFlag].sort()).toEqual(ends);
+    // The rejoined stretch is still connected to the headquarters.
+    const hqFlag = sim.world.flag[headquarters(sim).flagPoint]!;
+    expect(sim.network.cost(hqFlag, ends[0] === hqFlag ? ends[1]! : ends[0]!)).toBeDefined();
+  });
+});
+
+describe('settlers and their tools', () => {
+  it('gives the builder his hammer back when the work is done', () => {
+    const sim = newGame();
+    const hammersBefore = sim.storedWare(PLAYER, Ware.Hammer);
+
+    const id = buildAndConnect(sim, BuildingType.Woodcutter, MapObject.Tree)!;
+    run(sim, 3000);
+
+    expect(sim.buildings.require(id).state).toBe(BuildingState.Complete);
+    // A trade keeps its tool, but building is a job, not a trade.
+    expect(sim.storedWare(PLAYER, Ware.Hammer)).toBe(hammersBefore);
+  });
+
+  it('does not spend a hammer per building put up', () => {
+    // The starting stock holds six hammers. While each build consumed one for
+    // good, the seventh building of any game could never be started.
+    const sim = newGame();
+    const hammers = sim.storedWare(PLAYER, Ware.Hammer);
+
+    let completed = 0;
+    for (let i = 0; i < 4; i += 1) {
+      const id = buildAndConnect(sim, BuildingType.Woodcutter, null);
+      if (id === undefined) break;
+      run(sim, 2600);
+      if (sim.buildings.require(id).state === BuildingState.Complete) completed += 1;
+    }
+
+    expect(completed).toBeGreaterThanOrEqual(3);
+    expect(sim.storedWare(PLAYER, Ware.Hammer)).toBe(hammers);
+  });
+
+  it('returns the worker of a demolished building to the population', () => {
+    const sim = newGame();
+    const id = buildAndConnect(sim, BuildingType.Woodcutter, MapObject.Tree)!;
+    run(sim, 3000);
+
+    const before = sim.population(PLAYER);
+    sim.demolishBuilding(PLAYER, sim.buildings.require(id).point);
+    run(sim, 20);
+
+    expect(sim.population(PLAYER)).toBe(before);
+  });
+});
+
+describe('recovering from a torn-up network', () => {
+  it('finishes a site whose road was destroyed and laid again', () => {
+    const sim = newGame();
+    const id = buildAndConnect(sim, BuildingType.Sawmill)!;
+    run(sim, 400);
+
+    // Tear up the supply line mid-delivery, then restore it.
+    const road = sim.roads.all()[0]!;
+    const site = sim.buildings.require(id);
+    expect(sim.demolishRoad(PLAYER, road.points[1]!).ok).toBe(true);
+    run(sim, 300);
+
+    expect(site.status).toBe(BuildingStatus.Unreachable);
+
+    const route = planRoad(sim.world, headquarters(sim).flagPoint, site.flagPoint, PLAYER);
+    expect(route).toBeDefined();
+    expect(sim.placeRoad(PLAYER, route!).ok).toBe(true);
+
+    // Reservations left behind by the interrupted deliveries used to make the
+    // site look satisfied for good, so nothing more was ever sent.
+    run(sim, 6000);
+    expect(site.state).toBe(BuildingState.Complete);
   });
 });

@@ -17,6 +17,7 @@ const STATUS_TEXT: Readonly<Record<BuildingStatus, string>> = {
   [BuildingStatus.Exhausted]: 'Nothing left within reach',
   [BuildingStatus.Blocked]: 'The flag outside is full',
   [BuildingStatus.UnderConstruction]: 'Under construction',
+  [BuildingStatus.Unreachable]: 'No road connects this to your network',
 };
 
 export interface HudCallbacks {
