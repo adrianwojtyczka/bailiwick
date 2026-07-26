@@ -7,3 +7,16 @@ $ochre: #c4832b;
 $forest: #4a6b32;
 $brick: #9c4128;
 $rule: #d3bf94;
+
+// Panels float over the map, so they need a little weight behind them.
+$panel-bg: rgba(244, 232, 206, 0.96);
+$panel-shadow: 0 6px 24px rgba(24, 17, 10, 0.38);
+
+$radius: 10px;
+$radius-small: 6px;
+
+// Every interactive target clears the 44px minimum for a fingertip.
+$touch-target: 46px;
+
+$font-body: ui-serif, Georgia, 'Iowan Old Style', 'Palatino Linotype', serif;
+$font-ui: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;

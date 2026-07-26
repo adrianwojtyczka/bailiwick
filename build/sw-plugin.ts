@@ -20,6 +20,12 @@ const CACHE = ${JSON.stringify(cacheName)};
 const PRECACHE = ${JSON.stringify(precache, null, 2)};
 const INDEX = new URL('index.html', self.location.href).href;
 
+// The precache is keyed purely by URL. Servers commonly send "Vary: Origin",
+// and a module script or stylesheet is fetched with an Origin header that the
+// precache request did not carry — so without ignoreVary every asset would miss
+// the cache and the game would only work offline as a blank page.
+const MATCH = { ignoreSearch: true, ignoreVary: true };
+
 self.addEventListener('install', (event) => {
   event.waitUntil(
     caches
@@ -46,13 +52,13 @@ self.addEventListener('fetch', (event) => {
   // Navigations always resolve to the cached shell so the game opens offline.
   if (request.mode === 'navigate') {
     event.respondWith(
-      caches.match(INDEX).then((cached) => cached || fetch(request)),
+      caches.match(INDEX, MATCH).then((cached) => cached || fetch(request)),
     );
     return;
   }
 
   event.respondWith(
-    caches.match(request, { ignoreSearch: true }).then((cached) => {
+    caches.match(request, MATCH).then((cached) => {
       if (cached) return cached;
       return fetch(request).then((response) => {
         if (response.ok && response.type === 'basic') {

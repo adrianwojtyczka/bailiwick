@@ -1,5 +1,6 @@
 import { Direction, DIRECTIONS } from '../core/direction';
-import { MapGrid, OUT_OF_BOUNDS } from '../core/grid';
+import type { MapGrid } from '../core/grid';
+import { OUT_OF_BOUNDS } from '../core/grid';
 import type { TerrainProperties } from './terrain';
 import { terrainOf } from './terrain';
 

@@ -54,7 +54,15 @@ export default tseslint.config(
   },
 
   {
-    files: ['build/**/*.ts', '*.config.ts', '*.config.js', 'build/**/*.mjs'],
+    files: ['build/**/*.ts', '*.config.ts'],
+    languageOptions: { globals: globals.node },
+  },
+
+  {
+    // Plain JavaScript files sit outside the TypeScript project, so the
+    // type-aware rules have nothing to work from.
+    files: ['**/*.js', '**/*.mjs'],
+    extends: [tseslint.configs.disableTypeChecked],
     languageOptions: { globals: globals.node },
   },
 

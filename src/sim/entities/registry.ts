@@ -9,7 +9,7 @@ import { EntityPool, type PoolSnapshot } from '../core/pool';
  * behaviour independent of the order things happened to be created in.
  */
 export class EntityTable<T> {
-  private readonly pool: EntityPool;
+  private pool: EntityPool;
   private readonly items: (T | undefined)[] = [];
 
   constructor(initialCapacity = 128, pool?: EntityPool) {
@@ -85,16 +85,15 @@ export class EntityTable<T> {
   }
 
   /**
-   * Rebuilds a table from a snapshot and the entities it held. Used by save
-   * loading, where the entities are deserialised separately.
+   * Refills this table from a saved pool and the entities it held.
+   *
+   * Deliberately in place rather than returning a new table: the flag network
+   * and the simulation hold references to these tables, and swapping the
+   * objects out would leave those references pointing at the old, empty ones.
    */
-  static restore<T>(snapshot: PoolSnapshot, entities: readonly (T | undefined)[]): EntityTable<T> {
-    // The saved pool is adopted wholesale so indices line up exactly.
-    const table = new EntityTable<T>(snapshot.capacity, EntityPool.restore(snapshot));
-    for (let id = 0; id < entities.length; id += 1) {
-      const entity = entities[id];
-      if (entity !== undefined) table.items[id] = entity;
-    }
-    return table;
+  adopt(pool: PoolSnapshot, entities: readonly (T & { id: number })[]): void {
+    this.pool = EntityPool.restore(pool);
+    this.items.length = 0;
+    for (const entity of entities) this.items[entity.id] = entity;
   }
 }

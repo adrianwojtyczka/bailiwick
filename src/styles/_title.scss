@@ -1,0 +1,133 @@
+@use 'tokens' as *;
+@use 'mixins' as *;
+
+.title {
+  @include safe-area(1.25rem);
+
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1.25rem;
+  min-height: 100%;
+  margin: 0 auto;
+  max-width: 42rem;
+  overflow-y: auto;
+  text-align: center;
+}
+
+.title__header {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.title__crest svg {
+  width: 3.25rem;
+  height: 3.25rem;
+}
+
+.title__name {
+  margin: 0;
+  font-family: $font-body;
+  font-size: clamp(2.2rem, 9vw, 3.2rem);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+
+.title__tagline {
+  margin: 0;
+  max-width: 28rem;
+  color: $ink-soft;
+  font-size: 0.95rem;
+  line-height: 1.5;
+}
+
+.title__scene {
+  width: 100%;
+  border: 1px solid $rule;
+  border-radius: $radius;
+  background: $parchment-deep;
+  overflow: hidden;
+
+  svg {
+    display: block;
+    width: 100%;
+    height: auto;
+  }
+}
+
+.title__menu {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  width: 100%;
+  max-width: 22rem;
+}
+
+.title__button {
+  @include tappable;
+
+  width: 100%;
+  border: 1px solid $rule;
+  background: $parchment-deep;
+  color: $ink;
+  font-family: $font-ui;
+  font-size: 1rem;
+  transition: background 0.15s ease, transform 0.08s ease;
+
+  &:hover:not(:disabled) {
+    background: color-mix(in srgb, $parchment-deep 80%, $ochre);
+  }
+
+  &:active:not(:disabled) {
+    transform: translateY(1px);
+  }
+
+  &:disabled {
+    opacity: 0.45;
+    cursor: default;
+  }
+}
+
+.title__button--primary {
+  background: $ochre;
+  border-color: color-mix(in srgb, $ochre 70%, $ink);
+  color: $parchment;
+  font-weight: 600;
+
+  &:hover:not(:disabled) {
+    background: color-mix(in srgb, $ochre 88%, $ink);
+  }
+}
+
+.title__save {
+  display: flex;
+  gap: 0.4rem;
+
+  .title__button--save {
+    flex: 1;
+    text-align: left;
+    font-size: 0.9rem;
+  }
+}
+
+.title__button--delete {
+  width: auto;
+  flex: 0 0 auto;
+  color: $brick;
+}
+
+.title__message {
+  margin: 0;
+  min-height: 1.2rem;
+  color: $brick;
+  font-size: 0.9rem;
+}
+
+.title__footer {
+  margin-top: auto;
+  padding-top: 0.5rem;
+  color: $ink-soft;
+  font-size: 0.8rem;
+}

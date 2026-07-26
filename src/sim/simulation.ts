@@ -6,6 +6,7 @@ import type { BuildingInfo, BuildingType } from './data/buildings';
 import { BuildingType as Type, buildingInfo } from './data/buildings';
 import { Profession, professionInfo } from './data/professions';
 import { Ware, WARE_COUNT } from './data/wares';
+import type { PoolSnapshot } from './core/pool';
 import { EntityTable } from './entities/registry';
 import type { Building, Flag, Road, Settler, WareParcel } from './entities/types';
 import {
@@ -82,6 +83,44 @@ export interface SimulationOptions {
   readonly height: number;
   readonly seed: number;
   readonly players: readonly PlayerConfig[];
+}
+
+/** Bumped whenever the shape of a saved game changes. */
+export const SAVE_VERSION = 1;
+
+/** The parts of the map that play can change, and so must be saved. */
+export interface MapSnapshot {
+  readonly object: Uint8Array;
+  readonly objectData: Uint8Array;
+  readonly resource: Uint8Array;
+  readonly resourceAmount: Uint8Array;
+  readonly resourceKnown: Uint8Array;
+  readonly owner: Uint8Array;
+  readonly roads: Uint8Array;
+  readonly building: Int32Array;
+  readonly flag: Int32Array;
+}
+
+interface TableSnapshot<T> {
+  readonly pool: PoolSnapshot;
+  readonly items: readonly T[];
+}
+
+export interface SimulationSnapshot {
+  readonly version: number;
+  readonly seed: number;
+  readonly width: number;
+  readonly height: number;
+  readonly tick: number;
+  readonly rng: number;
+  readonly players: readonly Player[];
+  readonly map: MapSnapshot;
+  readonly flags: TableSnapshot<Flag>;
+  readonly roads: TableSnapshot<Road>;
+  readonly buildings: TableSnapshot<Building>;
+  readonly settlers: TableSnapshot<Settler>;
+  readonly growingTrees: readonly number[];
+  readonly events: readonly string[];
 }
 
 export type CommandResult = { readonly ok: true } | { readonly ok: false; readonly reason: string };
@@ -1365,6 +1404,88 @@ export class Simulation {
       if (stage < TREE_FULLY_GROWN) stillGrowing.push(point);
     }
     this.growingTrees = stillGrowing;
+  }
+
+  // -------------------------------------------------------------- saving
+
+  /**
+   * A complete, structured copy of the game.
+   *
+   * Terrain and altitude are left out on purpose: they are a pure function of
+   * the seed, so a save stores the seed and regenerates them. Only what play
+   * has actually changed — ownership, roads, what stands on the ground, and the
+   * entities — needs to be written down, which keeps saves small enough to hand
+   * around as a file.
+   *
+   * The typed arrays are handed over as-is; turning them into something a file
+   * can hold is the platform layer's business, not the simulation's.
+   */
+  toSnapshot(): SimulationSnapshot {
+    return {
+      version: SAVE_VERSION,
+      seed: this.seed,
+      width: this.world.grid.width,
+      height: this.world.grid.height,
+      tick: this.tick,
+      rng: this.rng.save(),
+      players: this.players.map((player) => ({ ...player })),
+      map: {
+        object: this.world.object,
+        objectData: this.world.objectData,
+        resource: this.world.resource,
+        resourceAmount: this.world.resourceAmount,
+        resourceKnown: this.world.resourceKnown,
+        owner: this.world.owner,
+        roads: this.world.roads,
+        building: this.world.building,
+        flag: this.world.flag,
+      },
+      flags: { pool: this.flags.savePool(), items: this.flags.all() },
+      roads: { pool: this.roads.savePool(), items: this.roads.all() },
+      buildings: { pool: this.buildings.savePool(), items: this.buildings.all() },
+      settlers: { pool: this.settlers.savePool(), items: this.settlers.all() },
+      growingTrees: [...this.growingTrees],
+      events: [...this.events],
+    };
+  }
+
+  /** Rebuilds a game from `toSnapshot`. */
+  static fromSnapshot(snapshot: SimulationSnapshot): Simulation {
+    if (snapshot.version !== SAVE_VERSION) {
+      throw new Error(`unsupported save version ${snapshot.version}`);
+    }
+
+    // Regenerating from the seed restores terrain and altitude exactly.
+    const { world } = generateWorld({
+      width: snapshot.width,
+      height: snapshot.height,
+      seed: snapshot.seed,
+      players: Math.max(1, snapshot.players.length),
+    });
+
+    world.object.set(snapshot.map.object);
+    world.objectData.set(snapshot.map.objectData);
+    world.resource.set(snapshot.map.resource);
+    world.resourceAmount.set(snapshot.map.resourceAmount);
+    world.resourceKnown.set(snapshot.map.resourceKnown);
+    world.owner.set(snapshot.map.owner);
+    world.roads.set(snapshot.map.roads);
+    world.building.set(snapshot.map.building);
+    world.flag.set(snapshot.map.flag);
+
+    const simulation = new Simulation(world, snapshot.seed);
+    simulation.tick = snapshot.tick;
+    simulation.rng = Rng.restore(snapshot.rng);
+    simulation.growingTrees = [...snapshot.growingTrees];
+    simulation.players.push(...snapshot.players.map((player) => ({ ...player })));
+    simulation.events.push(...snapshot.events);
+
+    simulation.flags.adopt(snapshot.flags.pool, snapshot.flags.items);
+    simulation.roads.adopt(snapshot.roads.pool, snapshot.roads.items);
+    simulation.buildings.adopt(snapshot.buildings.pool, snapshot.buildings.items);
+    simulation.settlers.adopt(snapshot.settlers.pool, snapshot.settlers.items);
+
+    return simulation;
   }
 
   // ------------------------------------------------------------- reporting
