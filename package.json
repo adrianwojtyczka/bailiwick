@@ -1,0 +1,31 @@
+{
+  "name": "bailiwick",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A settlement-building real-time strategy game in the spirit of The Settlers II.",
+  "license": "MIT",
+  "scripts": {
+    "dev": "vite",
+    "prebuild": "node build/clean.mjs",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview --port 4173 --strictPort",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:e2e": "playwright test"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@playwright/test": "^1.62.0",
+    "@types/node": "^26.1.1",
+    "eslint": "^10.8.0",
+    "globals": "^17.7.0",
+    "sass": "^1.102.0",
+    "typescript": "~5.9",
+    "typescript-eslint": "^8.65.0",
+    "vite": "^8.1.5",
+    "vitest": "^4.1.10"
+  }
+}
