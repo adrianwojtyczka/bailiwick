@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bailiwick &mdash; a settlement-building strategy game</title>
+<meta name="description" content="Bailiwick is a real-time strategy game about roads, goods and patient economies, in the spirit of The Settlers II.">
+<style>
+  :root {
+    --parchment: #f4e8ce;
+    --parchment-deep: #e8d8b4;
+    --ink: #33261a;
+    --ink-soft: #6b5843;
+    --ochre: #c4832b;
+    --forest: #4a6b32;
+    --brick: #9c4128;
+    --rule: #d3bf94;
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    background: var(--parchment);
+    background-image:
+      radial-gradient(circle at 20% 10%, rgba(255,255,255,.5), transparent 45%),
+      radial-gradient(circle at 85% 80%, rgba(160,130,80,.18), transparent 50%);
+    color: var(--ink);
+    font: 17px/1.65 "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+  }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 0 24px; }
+
+  /* ---------- masthead ---------- */
+  header { padding: 56px 0 8px; text-align: center; }
+  .crest { width: 54px; height: 54px; margin-bottom: 14px; }
+  h1 {
+    margin: 0;
+    font-size: clamp(44px, 9vw, 76px);
+    letter-spacing: .16em;
+    text-transform: uppercase;
+    font-weight: 600;
+    text-shadow: 2px 2px 0 var(--parchment-deep);
+  }
+  .tagline {
+    margin: 6px 0 0;
+    font-size: clamp(15px, 2.4vw, 19px);
+    font-style: italic;
+    color: var(--ink-soft);
+  }
+  .rule {
+    display: flex; align-items: center; gap: 14px;
+    max-width: 420px; margin: 22px auto 0;
+    color: var(--ochre);
+  }
+  .rule::before, .rule::after {
+    content: ""; flex: 1; height: 2px;
+    background: linear-gradient(90deg, transparent, var(--rule), transparent);
+  }
+
+  /* ---------- scene ---------- */
+  .scene { margin: 4px auto 34px; max-width: 720px; }
+  .scene svg { display: block; width: 100%; height: auto; }
+
+  /* ---------- prose ---------- */
+  .lede {
+    max-width: 660px; margin: 0 auto 48px;
+    text-align: center; font-size: 19px;
+  }
+  .lede strong { color: var(--brick); font-weight: 600; }
+
+  h2 {
+    margin: 0 0 22px;
+    font-size: 14px; letter-spacing: .22em; text-transform: uppercase;
+    color: var(--ink-soft); font-weight: 600; text-align: center;
+  }
+
+  /* ---------- pillars ---------- */
+  .pillars {
+    display: grid; gap: 18px;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr));
+    max-width: 760px; margin-inline: auto;
+    margin-bottom: 56px; padding: 0; list-style: none;
+  }
+  .pillar {
+    background: rgba(255,252,244,.62);
+    border: 1px solid var(--rule);
+    border-radius: 3px;
+    padding: 22px 20px;
+    box-shadow: 0 1px 0 rgba(255,255,255,.7) inset, 0 2px 8px rgba(90,70,40,.07);
+  }
+  .pillar h3 {
+    margin: 0 0 8px; font-size: 18px; font-weight: 600;
+    display: flex; align-items: center; gap: 10px;
+  }
+  .pillar h3 svg { flex: none; }
+  .pillar p { margin: 0; font-size: 15.5px; color: var(--ink-soft); }
+
+  /* ---------- chain ---------- */
+  .chain {
+    display: flex; flex-wrap: wrap; justify-content: center;
+    align-items: center; gap: 6px 4px; margin: 0 0 14px;
+    padding: 0; list-style: none;
+  }
+  .chain li {
+    background: var(--parchment-deep);
+    border: 1px solid var(--rule);
+    border-radius: 999px;
+    padding: 5px 15px;
+    font-size: 14.5px; letter-spacing: .04em;
+  }
+  .chain li[aria-hidden] {
+    background: none; border: none; padding: 0 2px; color: var(--ochre);
+  }
+  .chain-note {
+    text-align: center; font-style: italic; color: var(--ink-soft);
+    font-size: 15px; margin: 0 0 56px;
+  }
+
+  /* ---------- status ---------- */
+  .status {
+    border: 1px solid var(--rule);
+    border-left: 4px solid var(--ochre);
+    background: rgba(255,252,244,.62);
+    border-radius: 3px;
+    padding: 20px 24px; margin: 0 auto 56px;
+    max-width: 760px;
+  }
+  .status h2 { text-align: left; margin-bottom: 12px; }
+  .status p { margin: 0; color: var(--ink-soft); }
+  .status code {
+    font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+    font-size: .88em; background: var(--parchment-deep);
+    padding: 1px 6px; border-radius: 3px;
+  }
+
+  footer {
+    border-top: 1px solid var(--rule);
+    padding: 22px 0 48px;
+    text-align: center; font-size: 14.5px; color: var(--ink-soft);
+  }
+
+  @media (max-width: 560px) {
+    header { padding-top: 36px; }
+    .lede { font-size: 17px; }
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    .scene svg, header > *, .lede { animation: rise .7s ease-out both; }
+    .lede { animation-delay: .1s; }
+    @keyframes rise { from { opacity: 0; transform: translateY(10px); } }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <svg class="crest" viewBox="0 0 48 48" aria-hidden="true">
+      <path d="M24 2 44 9v18c0 11-8.5 17.5-20 21C12.5 44.5 4 38 4 27V9z" fill="#c4832b" stroke="#8a5a17" stroke-width="2" stroke-linejoin="round"/>
+      <path d="M24 12 34 19v13H14V19z" fill="#f4e8ce"/>
+      <rect x="20" y="24" width="8" height="8" fill="#9c4128"/>
+    </svg>
+    <h1>Bailiwick</h1>
+    <p class="tagline">A settlement-building strategy game, in the spirit of <em>The Settlers II</em></p>
+    <p class="rule">&#10022;</p>
+  </header>
+
+  <div class="scene">
+    <svg viewBox="168 22 504 322" role="img" aria-label="An isometric settlement: huts and a watchtower along a winding road, bordered by water, forest and snow-capped mountains.">
+    <g class="terrain">
+      <polygon points="420,74 452,90 420,106 388,90" fill="#4a86a8" stroke="#3d7291" stroke-width="0.5"/>
+      <polygon points="452,90 484,106 452,122 420,106" fill="#4a86a8" stroke="#3d7291" stroke-width="0.5"/>
+      <polygon points="388,90 420,106 388,122 356,106" fill="#4a86a8" stroke="#3d7291" stroke-width="0.5"/>
+      <polygon points="484,106 516,122 484,138 452,122" fill="#dcc48a" stroke="#c8ae76" stroke-width="0.5"/>
+      <polygon points="420,106 452,122 420,138 388,122" fill="#dcc48a" stroke="#c8ae76" stroke-width="0.5"/>
+      <polygon points="356,106 388,122 356,138 324,122" fill="#dcc48a" stroke="#c8ae76" stroke-width="0.5"/>
+      <polygon points="516,122 548,138 516,154 484,138" fill="#6f9b4a" stroke="#5c8340" stroke-width="0.5"/>
+      <polygon points="452,122 484,138 452,154 420,138" fill="#6f9b4a" stroke="#5c8340" stroke-width="0.5"/>
+      <polygon points="388,122 420,138 388,154 356,138" fill="#6f9b4a" stroke="#5c8340" stroke-width="0.5"/>
+      <polygon points="324,122 356,138 324,154 292,138" fill="#6f9b4a" stroke="#5c8340" stroke-width="0.5"/>
+      <polygon points="548,138 580,154 548,170 516,154" fill="#6f9b4a" stroke="#5c8340" stroke-width="0.5"/>
+      <polygon points="484,138 516,154 484,170 452,154" fill="#6f9b4a" stroke="#5c8340" stroke-width="0.5"/>
+      <polygon points="420,138 452,154 420,170 388,154" fill="#6f9b4a" stroke="#5c8340" stroke-width="0.5"/>
+      <polygon points="356,138 388,154 356,170 324,154" fill="#6f9b4a" stroke="#5c8340" stroke-width="0.5"/>
+      <polygon points="292,138 324,154 292,170 260,154" fill="#6f9b4a" stroke="#5c8340" stroke-width="0.5"/>
+      <polygon points="580,154 612,170 580,186 548,170" fill="#6f9b4a" stroke="#5c8340" stroke-width="0.5"/>
+      <polygon points="516,154 548,170 516,186 484,170" fill="#6f9b4a" stroke="#5c8340" stroke-width="0.5"/>
+      <polygon points="452,154 484,170 452,186 420,170" fill="#c9a86a" stroke="#b3925a" stroke-width="0.5"/>
+      <polygon points="388,154 420,170 388,186 356,170" fill="#c9a86a" stroke="#b3925a" stroke-width="0.5"/>
+      <polygon points="324,154 356,170 324,186 292,170" fill="#6f9b4a" stroke="#5c8340" stroke-width="0.5"/>
+      <polygon points="260,154 292,170 260,186 228,170" fill="#6f9b4a" stroke="#5c8340" stroke-width="0.5"/>
+      <polygon points="612,170 644,186 612,202 580,186" fill="#6f9b4a" stroke="#5c8340" stroke-width="0.5"/>
+      <polygon points="548,170 580,186 548,202 516,186" fill="#5d8a3e" stroke="#4d7434" stroke-width="0.5"/>
+      <polygon points="484,170 516,186 484,202 452,186" fill="#c9a86a" stroke="#b3925a" stroke-width="0.5"/>
+      <polygon points="420,170 452,186 420,202 388,186" fill="#c9a86a" stroke="#b3925a" stroke-width="0.5"/>
+      <polygon points="356,170 388,186 356,202 324,186" fill="#c9a86a" stroke="#b3925a" stroke-width="0.5"/>
+      <polygon points="292,170 324,186 292,202 260,186" fill="#5d8a3e" stroke="#4d7434" stroke-width="0.5"/>
+      <polygon points="228,170 260,186 228,202 196,186" fill="#6f9b4a" stroke="#5c8340" stroke-width="0.5"/>
+      <polygon points="644,186 676,202 644,218 612,202" fill="#6f9b4a" stroke="#5c8340" stroke-width="0.5"/>
+      <polygon points="580,186 612,202 580,218 548,202" fill="#5d8a3e" stroke="#4d7434" stroke-width="0.5"/>
+      <polygon points="516,186 548,202 516,218 484,202" fill="#6f9b4a" stroke="#5c8340" stroke-width="0.5"/>
+      <polygon points="452,186 484,202 452,218 420,202" fill="#6f9b4a" stroke="#5c8340" stroke-width="0.5"/>
+      <polygon points="388,186 420,202 388,218 356,202" fill="#6f9b4a" stroke="#5c8340" stroke-width="0.5"/>
+      <polygon points="324,186 356,202 324,218 292,202" fill="#c9a86a" stroke="#b3925a" stroke-width="0.5"/>
+      <polygon points="260,186 292,202 260,218 228,202" fill="#6f9b4a" stroke="#5c8340" stroke-width="0.5"/>
+      <polygon points="196,186 228,202 196,218 164,202" fill="#6f9b4a" stroke="#5c8340" stroke-width="0.5"/>
+      <polygon points="612,202 644,218 612,234 580,218" fill="#6f9b4a" stroke="#5c8340" stroke-width="0.5"/>
+      <polygon points="548,202 580,218 548,234 516,218" fill="#6f9b4a" stroke="#5c8340" stroke-width="0.5"/>
+      <polygon points="484,202 516,218 484,234 452,218" fill="#6f9b4a" stroke="#5c8340" stroke-width="0.5"/>
+      <polygon points="420,202 452,218 420,234 388,218" fill="#6f9b4a" stroke="#5c8340" stroke-width="0.5"/>
+      <polygon points="356,202 388,218 356,234 324,218" fill="#c9a86a" stroke="#b3925a" stroke-width="0.5"/>
+      <polygon points="292,202 324,218 292,234 260,218" fill="#6f9b4a" stroke="#5c8340" stroke-width="0.5"/>
+      <polygon points="228,202 260,218 228,234 196,218" fill="#6f9b4a" stroke="#5c8340" stroke-width="0.5"/>
+      <polygon points="580,218 612,234 580,250 548,234" fill="#6f9b4a" stroke="#5c8340" stroke-width="0.5"/>
+      <polygon points="516,218 548,234 516,250 484,234" fill="#6f9b4a" stroke="#5c8340" stroke-width="0.5"/>
+      <polygon points="452,218 484,234 452,250 420,234" fill="#6f9b4a" stroke="#5c8340" stroke-width="0.5"/>
+      <polygon points="388,218 420,234 388,250 356,234" fill="#c9a86a" stroke="#b3925a" stroke-width="0.5"/>
+      <polygon points="324,218 356,234 324,250 292,234" fill="#c9a86a" stroke="#b3925a" stroke-width="0.5"/>
+      <polygon points="260,218 292,234 260,250 228,234" fill="#6f9b4a" stroke="#5c8340" stroke-width="0.5"/>
+      <polygon points="548,234 580,250 548,266 516,250" fill="#5d8a3e" stroke="#4d7434" stroke-width="0.5"/>
+      <polygon points="484,234 516,250 484,266 452,250" fill="#6f9b4a" stroke="#5c8340" stroke-width="0.5"/>
+      <polygon points="420,234 452,250 420,266 388,250" fill="#6f9b4a" stroke="#5c8340" stroke-width="0.5"/>
+      <polygon points="356,234 388,250 356,266 324,250" fill="#6f9b4a" stroke="#5c8340" stroke-width="0.5"/>
+      <polygon points="292,234 324,250 292,266 260,250" fill="#6f9b4a" stroke="#5c8340" stroke-width="0.5"/>
+      <polygon points="516,250 548,266 516,282 484,266" fill="#8d8378" stroke="#776e64" stroke-width="0.5"/>
+      <polygon points="452,250 484,266 452,282 420,266" fill="#6f9b4a" stroke="#5c8340" stroke-width="0.5"/>
+      <polygon points="388,250 420,266 388,282 356,266" fill="#8d8378" stroke="#776e64" stroke-width="0.5"/>
+      <polygon points="324,250 356,266 324,282 292,266" fill="#8d8378" stroke="#776e64" stroke-width="0.5"/>
+      <polygon points="484,266 516,282 484,298 452,282" fill="#8d8378" stroke="#776e64" stroke-width="0.5"/>
+      <polygon points="420,266 452,282 420,298 388,282" fill="#8d8378" stroke="#776e64" stroke-width="0.5"/>
+      <polygon points="356,266 388,282 356,298 324,282" fill="#8d8378" stroke="#776e64" stroke-width="0.5"/>
+      <polygon points="452,282 484,298 452,314 420,298" fill="#8d8378" stroke="#776e64" stroke-width="0.5"/>
+      <polygon points="388,282 420,298 388,314 356,298" fill="#8d8378" stroke="#776e64" stroke-width="0.5"/>
+      <polygon points="420,298 452,314 420,330 388,314" fill="#8d8378" stroke="#776e64" stroke-width="0.5"/>
+    </g>
+    <g class="props">
+      <ellipse cx="356" cy="124" rx="20" ry="9" fill="#000" opacity="0.16"/>
+      <rect x="354" y="110" width="4" height="13" fill="#6b4b2a"/>
+      <polygon points="356,88 345,110 367,110" fill="#3f6b31"/>
+      <polygon points="356,80 348,98 364,98" fill="#4d7d3a"/>
+      <ellipse cx="420" cy="124" rx="20" ry="9" fill="#000" opacity="0.16"/>
+      <rect x="418" y="110" width="4" height="13" fill="#6b4b2a"/>
+      <polygon points="420,88 409,110 431,110" fill="#3f6b31"/>
+      <polygon points="420,80 412,98 428,98" fill="#4d7d3a"/>
+      <ellipse cx="260" cy="172" rx="20" ry="9" fill="#000" opacity="0.16"/>
+      <polygon points="242,154 260,163 260,179 242,170" fill="#c2a982"/>
+      <polygon points="278,154 260,163 260,179 278,170" fill="#e0c9a0"/>
+      <polygon points="238,155 260,166 260,131" fill="#94371f"/>
+      <polygon points="282,155 260,166 260,131" fill="#b4472f"/>
+      <ellipse cx="324" cy="172" rx="20" ry="9" fill="#000" opacity="0.16"/>
+      <polygon points="306,154 324,163 324,179 306,170" fill="#c2a982"/>
+      <polygon points="342,154 324,163 324,179 342,170" fill="#e0c9a0"/>
+      <polygon points="302,155 324,166 324,131" fill="#94371f"/>
+      <polygon points="346,155 324,166 324,131" fill="#b4472f"/>
+      <ellipse cx="228" cy="188" rx="20" ry="9" fill="#000" opacity="0.16"/>
+      <rect x="226" y="174" width="4" height="13" fill="#6b4b2a"/>
+      <polygon points="228,152 217,174 239,174" fill="#3f6b31"/>
+      <polygon points="228,144 220,162 236,162" fill="#4d7d3a"/>
+      <ellipse cx="484" cy="188" rx="20" ry="9" fill="#000" opacity="0.16"/>
+      <polygon points="460,162 484,174 484,198 460,186" fill="#c8b28b"/>
+      <polygon points="508,162 484,174 484,198 508,186" fill="#e6d3ae"/>
+      <polygon points="456,163 484,177 484,130" fill="#70452c"/>
+      <polygon points="512,163 484,177 484,130" fill="#8c5a3c"/>
+      <ellipse cx="548" cy="188" rx="20" ry="9" fill="#000" opacity="0.16"/>
+      <polygon points="530,170 548,179 548,195 530,186" fill="#c2a982"/>
+      <polygon points="566,170 548,179 548,195 566,186" fill="#e0c9a0"/>
+      <polygon points="526,171 548,182 548,147" fill="#94371f"/>
+      <polygon points="570,171 548,182 548,147" fill="#b4472f"/>
+      <ellipse cx="580" cy="204" rx="20" ry="9" fill="#000" opacity="0.16"/>
+      <polygon points="562,186 580,195 580,211 562,202" fill="#c2a982"/>
+      <polygon points="598,186 580,195 580,211 598,202" fill="#e0c9a0"/>
+      <polygon points="558,187 580,198 580,163" fill="#94371f"/>
+      <polygon points="602,187 580,198 580,163" fill="#b4472f"/>
+      <ellipse cx="292" cy="220" rx="20" ry="9" fill="#000" opacity="0.16"/>
+      <rect x="290" y="206" width="4" height="13" fill="#6b4b2a"/>
+      <polygon points="292,184 281,206 303,206" fill="#3f6b31"/>
+      <polygon points="292,176 284,194 300,194" fill="#4d7d3a"/>
+      <ellipse cx="452" cy="236" rx="20" ry="9" fill="#000" opacity="0.16"/>
+      <polygon points="439,194 452,201 452,241 439,234" fill="#b0a695"/>
+      <polygon points="465,194 452,201 452,241 465,234" fill="#cfc6b4"/>
+      <polygon points="435,195 452,204 452,169" fill="#4a6377"/>
+      <polygon points="469,195 452,204 452,169" fill="#5f7c94"/>
+      <ellipse cx="516" cy="236" rx="20" ry="9" fill="#000" opacity="0.16"/>
+      <rect x="514" y="222" width="4" height="13" fill="#6b4b2a"/>
+      <polygon points="516,200 505,222 527,222" fill="#3f6b31"/>
+      <polygon points="516,192 508,210 524,210" fill="#4d7d3a"/>
+      <ellipse cx="580" cy="236" rx="20" ry="9" fill="#000" opacity="0.16"/>
+      <rect x="578" y="222" width="4" height="13" fill="#6b4b2a"/>
+      <polygon points="580,200 569,222 591,222" fill="#3f6b31"/>
+      <polygon points="580,192 572,210 588,210" fill="#4d7d3a"/>
+      <ellipse cx="292" cy="252" rx="20" ry="9" fill="#000" opacity="0.16"/>
+      <rect x="290" y="238" width="4" height="13" fill="#6b4b2a"/>
+      <polygon points="292,216 281,238 303,238" fill="#3f6b31"/>
+      <polygon points="292,208 284,226 300,226" fill="#4d7d3a"/>
+      <polygon points="516,208 484,266 516,282" fill="#7d746a"/>
+      <polygon points="516,208 548,266 516,282" fill="#9a9187"/>
+      <polygon points="516,208 505,226 516,234 527,226" fill="#e9e4da"/>
+      <polygon points="356,238 324,282 356,298" fill="#7d746a"/>
+      <polygon points="356,238 388,282 356,298" fill="#9a9187"/>
+      <polygon points="356,238 345,256 356,264 367,256" fill="#e9e4da"/>
+      <polygon points="420,238 388,282 420,298" fill="#7d746a"/>
+      <polygon points="420,238 452,282 420,298" fill="#9a9187"/>
+      <polygon points="420,238 409,256 420,264 431,256" fill="#e9e4da"/>
+      <polygon points="452,240 420,298 452,314" fill="#7d746a"/>
+      <polygon points="452,240 484,298 452,314" fill="#9a9187"/>
+      <polygon points="452,240 441,258 452,266 463,258" fill="#e9e4da"/>
+    </g>
+    </svg>
+  </div>
+
+  <p class="lede">
+    You do not command an army &mdash; you command an <strong>economy</strong>. Claim territory,
+    lay the roads that carry every plank and loaf, and watch a handful of huts grow into a
+    province that feeds itself.
+  </p>
+
+  <h2>What you will be doing</h2>
+  <ul class="pillars">
+    <li class="pillar">
+      <h3><svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true"><path d="M1 14C5 14 5 4 9 4s4 10 8 10" stroke="#c4832b" stroke-width="2.4" fill="none" stroke-linecap="round"/></svg>Roads first</h3>
+      <p>Nothing moves without a road. Every path you draw becomes a supply line, and every junction a place where goods pile up or run dry.</p>
+    </li>
+    <li class="pillar">
+      <h3><svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true"><circle cx="5" cy="6" r="3" fill="#4a6b32"/><circle cx="13" cy="12" r="3" fill="#4a6b32"/><path d="M7.5 7.5 10.5 10.5" stroke="#4a6b32" stroke-width="2"/></svg>Production chains</h3>
+      <p>Bread needs flour, flour needs grain, grain needs a farm with room to grow. Break one link and the whole province notices.</p>
+    </li>
+    <li class="pillar">
+      <h3><svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true"><path d="M9 1 16 5v6c0 3-3 5-7 6-4-1-7-3-7-6V5z" fill="none" stroke="#9c4128" stroke-width="2" stroke-linejoin="round"/></svg>Borders &amp; banners</h3>
+      <p>Territory is won by building, not by marching. Raise a watchtower and your border creeps outward over the land it can see.</p>
+    </li>
+    <li class="pillar">
+      <h3><svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true"><path d="M2 13 9 3l7 10z" fill="#8d8378"/><path d="M6.5 8.5 9 5l2.5 3.5z" fill="#f4e8ce"/></svg>Land that matters</h3>
+      <p>Forest, water, meadow and mountain each decide what can stand on them. The map is not scenery &mdash; it is the puzzle.</p>
+    </li>
+  </ul>
+
+  <h2>A chain, start to finish</h2>
+  <ul class="chain">
+    <li>Forester</li><li aria-hidden="true">&rarr;</li>
+    <li>Woodcutter</li><li aria-hidden="true">&rarr;</li>
+    <li>Sawmill</li><li aria-hidden="true">&rarr;</li>
+    <li>Planks</li><li aria-hidden="true">&rarr;</li>
+    <li>Everything else</li>
+  </ul>
+  <p class="chain-note">Five buildings, one road, and a carrier who never stops walking.</p>
+
+  <div class="status">
+    <h2>Where the project stands</h2>
+    <p>
+      Bailiwick is in early development and this page is its first landing on
+      <code>main</code>. Design notes, build instructions and screenshots will follow here as
+      the simulation takes shape.
+    </p>
+  </div>
+
+  <footer>
+    <p>Bailiwick &middot; a settlement-building strategy game &middot; work in progress</p>
+  </footer>
+
+</div>
+</body>
+</html>
