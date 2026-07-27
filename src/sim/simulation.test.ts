@@ -1102,6 +1102,62 @@ describe('the farm', () => {
       expect(sim.world.isWalkable(point)).toBe(true);
     }
   });
+
+  /** Every field standing within sight of the farm, whatever its stage. */
+  function fieldsAround(sim: Simulation, centre: number): number[] {
+    return sim.world.grid
+      .pointsWithin(centre, 6)
+      .filter((point) => sim.world.object[point] === MapObject.Field);
+  }
+
+  it('lays its fields in a ring exactly two nodes out', () => {
+    const sim = newGame(FARMING_SEED);
+    const id = buildFarm(sim)!;
+    const farm = sim.buildings.require(id);
+
+    // Checked every tick: a field sown against the farmyard would be reaped
+    // again long before the run ended.
+    for (let i = 0; i < 12000; i += 1) {
+      sim.update();
+      for (const field of fieldsAround(sim, farm.point)) {
+        expect(sim.world.grid.distance(farm.point, field)).toBe(2);
+      }
+    }
+  });
+
+  it('never sows two fields side by side, nor one against a wall', () => {
+    const sim = newGame(FARMING_SEED);
+    const id = buildFarm(sim)!;
+    const farm = sim.buildings.require(id);
+
+    for (let i = 0; i < 12000; i += 1) {
+      sim.update();
+      for (const field of fieldsAround(sim, farm.point)) {
+        for (const direction of DIRECTIONS) {
+          const neighbour = sim.world.grid.neighbour(field, direction);
+          expect(sim.world.object[neighbour]).not.toBe(MapObject.Field);
+          expect(sim.world.building[neighbour]).toBe(0);
+        }
+      }
+    }
+  });
+
+  it('works five or six fields at once on open meadow', () => {
+    const sim = newGame(FARMING_SEED);
+    const id = buildFarm(sim)!;
+    const farm = sim.buildings.require(id);
+
+    let most = 0;
+    for (let i = 0; i < 12000; i += 1) {
+      sim.update();
+      most = Math.max(most, fieldsAround(sim, farm.point).length);
+    }
+
+    // The ring holds twelve nodes and no two neighbours may both be sown, so
+    // half of them is the ceiling — and a farm on good land should reach it.
+    expect(most).toBeGreaterThanOrEqual(5);
+    expect(most).toBeLessThanOrEqual(6);
+  });
 });
 
 describe('geologists', () => {
@@ -1611,6 +1667,133 @@ describe('a road torn up under a loaded carrier', () => {
     run(sim, 20000);
     expect(site.state).toBe(BuildingState.Complete);
   });
+
+  /**
+   * A sawmill site reached by two roads with a flag between them, and a carrier
+   * on the far one holding a crate bound for the site.
+   *
+   * The middle flag is what makes the test worth anything: with a single road
+   * there is nowhere for a dismissed carrier to go but the headquarters, so
+   * turning back and carrying on would look the same.
+   */
+  function carrierOnTheFarRoad(sim: Simulation, midStride = false) {
+    const hq = headquarters(sim);
+    const info = buildingInfo(BuildingType.Sawmill);
+
+    // As far off as the territory allows, so the road between is long enough to
+    // carry a flag partway along it.
+    let far: number | undefined;
+    let furthest = 0;
+    for (const point of sim.world.grid.pointsWithin(hq.point, 9)) {
+      const distance = sim.world.grid.distance(hq.point, point);
+      if (distance <= furthest) continue;
+      const space = evaluateBuildSpace(sim.world, point, PLAYER);
+      if (space === BuildSpace.None || !canHostSize(space, info.size)) continue;
+      furthest = distance;
+      far = point;
+    }
+    expect(far).toBeDefined();
+    expect(sim.placeBuilding(PLAYER, far!, BuildingType.Sawmill).ok).toBe(true);
+
+    const site = sim.buildings.find((building) => building.point === far)!;
+    const route = planRoad(sim.world, hq.flagPoint, site.flagPoint, PLAYER);
+    expect(sim.placeRoad(PLAYER, route!).ok).toBe(true);
+
+    // Somewhere along its length — flags keep their distance from one another,
+    // so the exact node has to be one the game will take.
+    const whole = sim.roads.all()[0]!;
+    const middle = whole.points.slice(1, -1).find((point) => sim.placeFlag(PLAYER, point).ok);
+    expect(middle).toBeDefined();
+
+    const farRoad = sim.roads.all().find((road) => road.points.includes(site.flagPoint))!;
+    expect(farRoad).toBeDefined();
+
+    for (let i = 0; i < 8000; i += 1) {
+      sim.update();
+      const carrier = sim.settlers
+        .all()
+        .find(
+          (settler) =>
+            settler.carrying !== null &&
+            settler.road === farRoad.id &&
+            settler.state === SettlerState.CarrierDelivering &&
+            (!midStride || (settler.stepProgress > 0 && settler.toPoint !== settler.point)),
+        );
+      if (carrier) return { carrier, farRoad, site, middle };
+    }
+
+    throw new Error('no loaded carrier appeared on the far road');
+  }
+
+  /**
+   * Where a settler goes, tick by tick, until he walks into a store and is
+   * taken in — after which the object is back in the pool and no longer his.
+   */
+  function followUntilTakenIn(sim: Simulation, settler: { id: number }, ticks: number): number[] {
+    const walked: number[] = [];
+    for (let i = 0; i < ticks; i += 1) {
+      sim.update();
+      const still = sim.settlers.get(settler.id);
+      if (still !== settler) break;
+      walked.push(still.point);
+    }
+    return walked;
+  }
+
+  it('turns him back rather than letting him finish the delivery', () => {
+    const sim = newGame();
+    const { carrier, farRoad, site } = carrierOnTheFarRoad(sim);
+
+    const held = carrier.carrying!;
+    expect(sim.demolishRoad(PLAYER, farRoad.points[1]!).ok).toBe(true);
+
+    // Watch for the moment the crate leaves his hands.
+    let setDownAt: number | undefined;
+    for (let i = 0; i < 400 && setDownAt === undefined; i += 1) {
+      sim.update();
+      const still = sim.settlers.get(carrier.id);
+      if (still !== carrier) break;
+      if (carrier.carrying === null) setDownAt = carrier.point;
+    }
+
+    // He put it down on a flag, and not the one he was walking to: the road
+    // there has gone, and the crate would have been stranded on it.
+    expect(setDownAt).toBeDefined();
+    expect(setDownAt).not.toBe(site.flagPoint);
+    expect(sim.world.flag[setDownAt!]).toBeGreaterThan(0);
+
+    const flag = sim.flags.require(sim.world.flag[setDownAt!]!);
+    expect(flag.wares.some((parcel) => parcel.ware === held)).toBe(true);
+
+    // Nothing was left at the far end.
+    const siteFlag = sim.flags.require(sim.world.flag[site.flagPoint]!);
+    expect(siteFlag.wares).toHaveLength(0);
+  });
+
+  it('never jumps him from one node to another', () => {
+    const sim = newGame();
+    const { carrier, farRoad } = carrierOnTheFarRoad(sim, true);
+
+    // Caught between two nodes, which is where re-routing used to show: the
+    // step was restarted from the node behind him, so he slid backwards a
+    // pace before turning.
+    const from = carrier.fromPoint;
+    const to = carrier.toPoint;
+    const progress = carrier.stepProgress;
+    expect(progress).toBeGreaterThan(0);
+
+    expect(sim.demolishRoad(PLAYER, farRoad.points[1]!).ok).toBe(true);
+
+    expect(carrier.fromPoint).toBe(from);
+    expect(carrier.toPoint).toBe(to);
+    expect(carrier.stepProgress).toBe(progress);
+
+    // And from there on, one neighbouring node at a time all the way home.
+    const walked = [carrier.point, ...followUntilTakenIn(sim, carrier, 400)];
+    for (let i = 1; i < walked.length; i += 1) {
+      expect(sim.world.grid.distance(walked[i - 1]!, walked[i]!)).toBeLessThanOrEqual(1);
+    }
+  });
 });
 
 describe('carrying the work in and out', () => {
@@ -1665,6 +1848,32 @@ describe('messages', () => {
     expect(exhausted.length).toBeGreaterThan(0);
     expect(exhausted.length).toBeLessThanOrEqual(2);
     expect(exhausted[0]!.point).toBe(hut.point);
+  });
+
+  it('waits two full minutes before saying so', () => {
+    const sim = newGame();
+    const id = buildAndConnect(sim, BuildingType.Woodcutter, MapObject.Tree)!;
+    run(sim, 3000);
+
+    const hut = sim.buildings.require(id);
+    for (const point of sim.world.grid.pointsWithin(hut.point, 8)) {
+      if (sim.world.object[point] === MapObject.Tree) sim.world.object[point] = MapObject.None;
+    }
+
+    const exhausted = () => sim.events.filter((message) => message.category === 'exhausted').length;
+
+    // How long it had been finding nothing when it finally said so. Wall-clock
+    // ticks would not do: the count only runs while the worker is indoors with
+    // nothing to go out for, so it lags the clock.
+    let idleWhenReported: number | undefined;
+    for (let i = 0; i < 6000 && idleWhenReported === undefined; i += 1) {
+      sim.update();
+      if (exhausted() > 0) idleWhenReported = hut.exhaustedFor;
+    }
+
+    // Two minutes at five ticks a second. Anything sooner and a woodcutter
+    // sharing a forester complains between one tree and the next.
+    expect(idleWhenReported).toBe(600);
   });
 
   it('reports a seam once rather than once per hole', () => {

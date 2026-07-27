@@ -106,10 +106,10 @@ const SURVEY_MESSAGE_SPREAD = 3;
 const STORE_DISPATCH_LIMIT = Math.floor(FLAG_CAPACITY / 2);
 
 /**
- * How long a building must find nothing before it says so — about a minute and
- * a half. Short of that it is simply between trips.
+ * How long a building must find nothing before it says so — two full minutes at
+ * five ticks a second. Short of that it is simply between trips.
  */
-const EXHAUSTED_REPORT_TICKS = 450;
+const EXHAUSTED_REPORT_TICKS = 600;
 
 /**
  * How long a worker rests indoors between trips out.
@@ -861,10 +861,13 @@ export class Simulation {
       if (index >= 0) flag.roads.splice(index, 1);
     }
 
-    if (road.carrier) this.dismissSettler(road.carrier);
-
+    // The carrier is let go only once the road has really gone and the network
+    // knows it. He works out his way home from where he stands, and that route
+    // has to be through the country as it is now, not as it was a moment ago.
     this.roads.remove(road.id);
     this.network.invalidate();
+
+    if (road.carrier) this.dismissSettler(road.carrier);
   }
 
   /** Sends a settler back into the nearest store. */
@@ -881,38 +884,40 @@ export class Simulation {
   }
 
   /**
-   * Sends a dismissed settler off to leave his crate at the first flag he can
-   * reach, rather than setting it down from wherever he happens to be standing.
+   * Turns a dismissed carrier round and sends him home, leaving his crate at
+   * the first flag on the way.
    *
-   * Returns false when he has nothing in hand, or when no flag is within reach
-   * — in which case the crate is put down on the spot, which is at least honest
-   * about the ware not being destroyed.
+   * He must not finish the delivery he was in the middle of. The road under him
+   * has just gone; the flag he was walking to may no longer connect to anything,
+   * and carrying on to it would strand the crate somewhere nothing can reach.
+   * So the route is worked out backwards from where he is going *now* — the
+   * nearest store — and the crate is set down at the first flag along it, which
+   * puts it back on the network behind him.
+   *
+   * Returns false when he has nothing in hand, or when there is no store, no
+   * route home, or no flag on the way with room for the crate; the caller then
+   * puts it down where it stands, which at least does not destroy it.
    */
   private carryCrateToNearestFlag(settler: Settler): boolean {
     if (settler.carrying === null) return false;
 
-    // The end of the road he was working comes first: it is the way he came and
-    // the way anything else will leave.
-    const road = this.roads.get(settler.road);
-    const preferred = [settler.taskPoint, road?.fromFlag ?? 0, road?.toFlag ?? 0]
-      .map((flagId) => (flagId ? this.flags.get(flagId)?.point : undefined))
-      .filter((point): point is number => point !== undefined);
+    const from = this.committedPoint(settler);
+    const store = this.nearestStore(settler.owner, from);
+    if (!store) return false;
 
-    const nearest = this.flagPointOf(settler.point);
-    if (nearest !== undefined) preferred.push(nearest);
+    const home = this.pathHome(from, store);
+    if (!home) return false;
 
-    for (const flagPoint of preferred) {
-      const flagId = this.world.flag[flagPoint];
+    for (const point of home) {
+      const flagId = this.world.flag[point];
       const flag = flagId ? this.flags.get(flagId) : undefined;
       if (!flag || flag.wares.length >= FLAG_CAPACITY) continue;
-      if (!walkablePath(this.world, settler.point, flagPoint)) continue;
 
       // He is nobody's worker now, so `setDownAtFlag` will send him home rather
       // than back through a door.
       settler.building = 0;
       settler.road = 0;
-      this.carryToFlag(settler, flagPoint);
-      return true;
+      return this.carryToFlag(settler, point);
     }
 
     return false;
@@ -1507,30 +1512,46 @@ export class Simulation {
     }
   }
 
-  /** Sends a worker to his building's own flag with what he is carrying. */
+  /**
+   * Sends a worker to his building's own flag with what he is carrying.
+   *
+   * The doorstep is always one step from the door, so if the pathfinder cannot
+   * find a way — it will not walk *out* of a building — he simply takes that
+   * step. He is standing inside, which is the one place a settler may be that
+   * open ground does not connect to.
+   */
   private walkToOwnFlag(settler: Settler, building: Building): void {
-    this.carryToFlag(settler, building.flagPoint);
+    if (this.carryToFlag(settler, building.flagPoint)) return;
+
+    settler.taskPoint = building.flagPoint;
+    settler.state = SettlerState.DeliveringToFlag;
+    this.redirect(settler, [building.flagPoint]);
   }
 
   /**
    * Sends a settler to a flag with what he is holding, wherever that flag is.
    *
-   * A worker's own doorstep for a finished ware; the nearest flag on the way
-   * home for a carrier whose road has just been torn up from under him. Either
-   * way the crate is walked there rather than appearing on the flag from a
-   * distance.
+   * A worker's own doorstep for a finished ware; the first flag on the way home
+   * for a carrier whose road has just been torn up from under him. Either way
+   * the crate is *walked* there: the settler is never moved to the flag, and a
+   * man caught in mid-stride finishes the pace he is taking before he turns.
+   *
+   * Returns false when there is no way through, leaving the settler exactly as
+   * he was so the caller can do something else with him.
    */
-  private carryToFlag(settler: Settler, flagPoint: number): void {
-    const path = walkablePath(this.world, settler.point, flagPoint);
+  private carryToFlag(settler: Settler, flagPoint: number): boolean {
+    const from = this.committedPoint(settler);
+    const path = walkablePath(this.world, from, flagPoint);
+    if (!path) return false;
 
     settler.taskPoint = flagPoint;
     settler.state = SettlerState.DeliveringToFlag;
-    this.setPath(settler, path ?? []);
+    this.redirect(settler, path);
 
-    if ((path?.length ?? 0) === 0) {
-      settler.point = flagPoint;
-      this.setDownAtFlag(settler);
-    }
+    // Already standing on it, with no step left to finish: put the crate down
+    // now rather than waste a tick arriving where he is.
+    if (path.length === 0 && !this.midStep(settler)) this.setDownAtFlag(settler);
+    return true;
   }
 
   /**
@@ -2105,7 +2126,7 @@ export class Simulation {
 
     // Only once it has really stopped. A woodcutter sharing a forester with
     // another dips in and out of having nothing to cut all day long, and saying
-    // so each time buried every other message; a minute and a half of finding
+    // so each time buried every other message; two solid minutes of finding
     // nothing at all is a different matter.
     if (building.exhaustedFor !== EXHAUSTED_REPORT_TICKS) return;
 
@@ -2133,7 +2154,7 @@ export class Simulation {
       case 'farm':
         return (
           this.findObject(centre, behaviour.radius, MapObject.Field) ??
-          this.findGrowingSpot(centre, behaviour.radius, 'farmable', true)
+          this.findFieldSpot(centre, behaviour.radius)
         );
       case 'plant':
         return this.findGrowingSpot(centre, behaviour.radius, 'plantable');
@@ -2735,31 +2756,55 @@ export class Simulation {
     centre: number,
     radius: number,
     property: 'plantable' | 'farmable',
-    clearAround = false,
   ): number | undefined {
     const suitable: number[] = [];
 
     for (const point of this.world.grid.pointsWithin(centre, radius)) {
       if (point === centre) continue;
       if (!this.isClearGround(point)) continue;
-
-      this.world.trianglesAroundPoint(point, TRIANGLE_SCRATCH);
-      let usable = 0;
-      for (let t = 0; t < 6; t += 1) {
-        const triangle = TRIANGLE_SCRATCH[t]!;
-        if (triangle === OUT_OF_BOUNDS) continue;
-        if (this.world.propertiesOfTriangle(triangle)[property]) usable += 1;
-      }
-      if (usable < 6) continue;
-
-      // A field needs elbow room: corn will not be sown against a tree, an
-      // outcrop, a road, or another field.
-      if (clearAround && !this.hasClearNeighbours(point)) continue;
+      if (!this.allSidesAre(point, property)) continue;
 
       suitable.push(point);
     }
 
     return this.rng.pick(suitable);
+  }
+
+  /**
+   * Where a farmer sows: the ring of points *exactly* `radius` out from the
+   * farmyard, never nearer and never further.
+   *
+   * Corn laid out that way looks like a farm's land rather than a rash across
+   * the countryside, and it keeps the yard itself clear — the building's own
+   * walls and flag lie a node inside the ring and so can never be in the way.
+   *
+   * The ring holds twelve points and no two neighbours may both be sown, so a
+   * farm on open meadow works five or six fields at once.
+   */
+  private findFieldSpot(centre: number, radius: number): number | undefined {
+    const suitable: number[] = [];
+
+    for (const point of this.world.grid.pointsWithin(centre, radius)) {
+      if (this.world.grid.distance(centre, point) !== radius) continue;
+      if (!this.isClearGround(point)) continue;
+      if (!this.allSidesAre(point, 'farmable')) continue;
+      if (!this.hasRoomToSow(point)) continue;
+
+      suitable.push(point);
+    }
+
+    return this.rng.pick(suitable);
+  }
+
+  /** Whether all six triangles meeting at a point will take what is being put in. */
+  private allSidesAre(point: number, property: 'plantable' | 'farmable'): boolean {
+    this.world.trianglesAroundPoint(point, TRIANGLE_SCRATCH);
+    for (let t = 0; t < 6; t += 1) {
+      const triangle = TRIANGLE_SCRATCH[t]!;
+      if (triangle === OUT_OF_BOUNDS) return false;
+      if (!this.world.propertiesOfTriangle(triangle)[property]) return false;
+    }
+    return true;
   }
 
   /** Bare ground with nothing standing on it and no road across it. */
@@ -2770,19 +2815,19 @@ export class Simulation {
   }
 
   /**
-   * Whether nothing is growing or standing on any of the six points around this
-   * one — no tree, no outcrop, and above all no other field.
+   * Whether a field may be sown here: no neighbouring point already carries a
+   * field or a building.
    *
-   * Deliberately about what is *on* the ground rather than what has been built
-   * across it. A farm's own walls and flag are neighbours of everything within
-   * its reach, so counting those would leave it nowhere at all to sow; a field
-   * running up to the farmyard or alongside a track is exactly right.
+   * Only those two. A field running alongside a track or up against a wood is
+   * exactly right — forbidding those as well would cost a farm most of its ring
+   * wherever the country is anything but bare.
    */
-  private hasClearNeighbours(point: number): boolean {
+  private hasRoomToSow(point: number): boolean {
     for (const direction of DIRECTIONS) {
       const neighbour = this.world.grid.neighbour(point, direction);
       if (neighbour === OUT_OF_BOUNDS) return false;
-      if (this.world.object[neighbour] !== MapObject.None) return false;
+      if (this.world.object[neighbour] === MapObject.Field) return false;
+      if (this.world.building[neighbour] !== 0) return false;
     }
     return true;
   }
