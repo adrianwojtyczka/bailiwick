@@ -130,9 +130,12 @@ export async function decodeSave(
 ): Promise<{ snapshot: SimulationSnapshot; meta: SaveMeta }> {
   const parsed = JSON.parse(await gunzip(bytes)) as EncodedSave;
 
-  if (parsed.version !== SAVE_VERSION) {
+  // Older saves are read on purpose: the simulation fills in anything a newer
+  // version added. A save from a *newer* version is the one we genuinely
+  // cannot read, because we do not know what it left out.
+  if (parsed.version > SAVE_VERSION) {
     throw new Error(
-      `This save was made by a different version of Bailiwick (${parsed.version}).`,
+      `This save was made by a newer version of Bailiwick (${parsed.version}).`,
     );
   }
 

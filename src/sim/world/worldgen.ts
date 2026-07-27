@@ -272,7 +272,10 @@ function generateResources(world: World, seed: number): void {
                 : Resource.Gold;
 
       world.resource[index] = resource;
-      world.resourceAmount[index] = rng.nextRange(2, 10);
+      // Enough to make sinking a shaft worth the boards it costs. A mine works
+      // the seam for some way around itself, but the ore still runs out, which
+      // is what eventually pushes a player outwards.
+      world.resourceAmount[index] = rng.nextRange(6, 24);
       continue;
     }
 

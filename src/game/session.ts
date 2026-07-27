@@ -87,6 +87,7 @@ export class GameSession {
         this.roadPreview = null;
       },
       placeFlag: (point) => this.run(() => simulation.placeFlag(playerId, point)),
+      sendGeologist: (point) => this.run(() => simulation.sendGeologist(playerId, point)),
       setSpeed: (speed) => this.loop.setSpeed(speed),
       save: () => void this.save('Manual save'),
       exportSave: () => void this.exportToFile(),

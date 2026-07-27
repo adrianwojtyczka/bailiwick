@@ -34,7 +34,13 @@ import {
   evaluateBuildSpace,
   FLAG_DIRECTION,
 } from './world/buildspace';
-import { MapObject, Resource, TREE_FULLY_GROWN } from './world/terrain';
+import {
+  FIELD_FULLY_GROWN,
+  MapObject,
+  Resource,
+  RESOURCE_NAMES,
+  TREE_FULLY_GROWN,
+} from './world/terrain';
 import type { World } from './world/world';
 import { generateWorld } from './world/worldgen';
 
@@ -47,6 +53,24 @@ const HEADQUARTERS_RADIUS = 9;
 /** Saplings advance one growth stage every this many ticks. */
 const TREE_GROWTH_INTERVAL = 260;
 
+/** Corn advances one growth stage every this many ticks. */
+const FIELD_GROWTH_INTERVAL = 150;
+
+/** How far from its shaft a mine can work the seam. */
+const SEAM_RADIUS = 2;
+
+/** How many outcrops one geologist strikes before he walks home. */
+const GEOLOGIST_SURVEYS = 3;
+
+/** How far from his flag, and from each stop, a geologist will wander. */
+const GEOLOGIST_RANGE = 8;
+
+/** How far around a strike the ground becomes known. */
+const GEOLOGIST_REVEAL = 2;
+
+/** Ticks spent hammering at one outcrop. */
+const GEOLOGIST_WORK_TICKS = 120;
+
 /** How often stranded wares are given a new destination. */
 const STRANDED_SWEEP_INTERVAL = 40;
 
@@ -54,10 +78,10 @@ const STRANDED_SWEEP_INTERVAL = 40;
  * How long a worker rests indoors between trips out.
  *
  * A woodcutter who turned straight round and left again read as frantic rather
- * than industrious. Six seconds of quiet is enough to see the door close behind
- * him and open again, which is what makes the cycle legible.
+ * than industrious. Twelve seconds of quiet is enough to see the door close
+ * behind him and open again, which is what makes the cycle legible.
  */
-const WORKER_REST_TICKS = 30;
+const WORKER_REST_TICKS = 60;
 
 /** Wares and settlers a player begins with. */
 const STARTING_STOCK: readonly { ware: Ware; count: number }[] = [
@@ -70,6 +94,12 @@ const STARTING_STOCK: readonly { ware: Ware; count: number }[] = [
   { ware: Ware.Shovel, count: 3 },
   { ware: Ware.Hammer, count: 6 },
   { ware: Ware.FishingRod, count: 2 },
+  // Enough of the specialist tools to open each new trade once. Replacing them
+  // is what the metalworks is for; until one is built these are all there is.
+  { ware: Ware.Scythe, count: 2 },
+  { ware: Ware.Crucible, count: 2 },
+  { ware: Ware.RollingPin, count: 1 },
+  { ware: Ware.Cleaver, count: 1 },
   { ware: Ware.Fish, count: 8 },
 ];
 
@@ -97,11 +127,16 @@ export interface SimulationOptions {
 /** The behaviours whose worker leaves the building to do the work. */
 type FieldWork = Extract<
   BuildingInfo['behaviour'],
-  { kind: 'harvest' } | { kind: 'plant' } | { kind: 'extract' }
+  { kind: 'harvest' } | { kind: 'plant' } | { kind: 'extract' } | { kind: 'farm' }
 >;
 
-/** Bumped whenever the shape of a saved game changes. */
-export const SAVE_VERSION = 1;
+/**
+ * Bumped whenever the shape of a saved game changes.
+ *
+ * Version 2 added ripening fields and the geologist's survey counter. Saves
+ * from version 1 still load: `fromSnapshot` fills in what they predate.
+ */
+export const SAVE_VERSION = 2;
 
 /** The parts of the map that play can change, and so must be saved. */
 export interface MapSnapshot {
@@ -135,6 +170,8 @@ export interface SimulationSnapshot {
   readonly buildings: TableSnapshot<Building>;
   readonly settlers: TableSnapshot<Settler>;
   readonly growingTrees: readonly number[];
+  /** Absent in version 1 saves, which predate farms. */
+  readonly growingFields?: readonly number[];
   readonly events: readonly string[];
 }
 
@@ -168,6 +205,8 @@ export class Simulation {
   private rng: Rng;
   /** Points holding a sapling that has not finished growing. */
   private growingTrees: number[] = [];
+  /** Points holding corn that has not finished ripening. */
+  private growingFields: number[] = [];
 
   private constructor(world: World, seed: number) {
     this.world = world;
@@ -325,6 +364,44 @@ export class Simulation {
     return OK;
   }
 
+  /**
+   * Sends a geologist out from a flag to look for ore.
+   *
+   * The mountains are seeded with coal, iron, gold and granite from the first
+   * tick, but none of it is visible. A mine sunk on a guess is a mine that
+   * reports itself exhausted, so somebody has to go and look first.
+   */
+  sendGeologist(player: number, point: number): CommandResult {
+    const flagId = this.world.flag[point];
+    if (!flagId) return fail('Geologists set out from a flag.');
+
+    const flag = this.flags.require(flagId);
+    if (flag.owner !== player) return fail('That flag is not yours.');
+
+    if (this.surveyTarget(point) === undefined) {
+      return fail('There is no rock within reach of that flag.');
+    }
+
+    const tool = professionInfo(Profession.Geologist).tool;
+    const store = this.supplierFor(player, flagId, tool);
+    if (!store) return fail('No store can spare a geologist and a hammer.');
+
+    const storeFlag = this.world.flag[store.flagPoint]!;
+    const path = roadPointPath(this.network, this.roads, storeFlag, flagId);
+    if (!path) return fail('No road runs from a store to that flag.');
+
+    store.reserve -= 1;
+    if (tool !== null) store.stock[tool] = store.stock[tool]! - 1;
+
+    const settler = this.createSettler(player, Profession.Geologist, store.flagPoint);
+    settler.surveysLeft = GEOLOGIST_SURVEYS;
+    settler.state = SettlerState.WalkingToJob;
+    this.setPath(settler, path);
+
+    this.note('A geologist sets out.');
+    return OK;
+  }
+
   // ------------------------------------------------------------ the tick
 
   /** Advances the world by one tick. */
@@ -335,6 +412,7 @@ export class Simulation {
     this.updateBuildings();
     this.updateRoads();
     this.growTrees();
+    this.growFields();
 
     if (this.tick % STRANDED_SWEEP_INTERVAL === 0) this.retargetStrandedWares();
   }
@@ -524,6 +602,7 @@ export class Simulation {
       road: 0,
       taskPoint: 0,
       taskTimer: 0,
+      surveysLeft: 0,
     }));
   }
 
@@ -932,6 +1011,11 @@ export class Simulation {
   }
 
   private arriveAtJob(settler: Settler): void {
+    if (settler.profession === Profession.Geologist) {
+      this.beginSurvey(settler);
+      return;
+    }
+
     if (settler.road !== 0) {
       const road = this.roads.get(settler.road);
       if (!road) {
@@ -960,17 +1044,97 @@ export class Simulation {
     settler.state = SettlerState.AtWork;
   }
 
+  // ------------------------------------------------------------ geologists
+
+  /**
+   * Rock a geologist could usefully strike, within walking reach of a point.
+   *
+   * He wants somewhere he can stand that is part of the mountain, and has not
+   * been looked at already — sending him back to a spot he has surveyed would
+   * teach the player nothing.
+   */
+  private surveyTarget(from: number): number | undefined {
+    const candidates: number[] = [];
+
+    for (const point of this.world.grid.pointsWithin(from, GEOLOGIST_RANGE)) {
+      if (this.world.resourceKnown[point]) continue;
+      if (!this.world.isWalkable(point)) continue;
+      if (this.world.building[point] !== 0 || this.world.flag[point] !== 0) continue;
+
+      this.world.trianglesAroundPoint(point, TRIANGLE_SCRATCH);
+      let rock = 0;
+      for (let t = 0; t < 6; t += 1) {
+        const triangle = TRIANGLE_SCRATCH[t]!;
+        if (triangle === OUT_OF_BOUNDS) continue;
+        if (this.world.propertiesOfTriangle(triangle).mineable) rock += 1;
+      }
+      if (rock >= 4) candidates.push(point);
+    }
+
+    return this.rng.pick(candidates);
+  }
+
+  /** Points the geologist at his next outcrop, or sends him home. */
+  private beginSurvey(settler: Settler): void {
+    if (settler.surveysLeft <= 0) {
+      this.sendHome(settler);
+      return;
+    }
+
+    const target = this.surveyTarget(settler.point);
+    const path = target === undefined ? undefined : walkablePath(this.world, settler.point, target);
+    if (target === undefined || !path) {
+      this.sendHome(settler);
+      return;
+    }
+
+    settler.surveysLeft -= 1;
+    settler.taskPoint = target;
+    settler.state = SettlerState.WalkingToTask;
+    this.setPath(settler, path);
+    if (path.length === 0) {
+      settler.state = SettlerState.PerformingTask;
+      settler.taskTimer = GEOLOGIST_WORK_TICKS;
+    }
+  }
+
+  /**
+   * He has finished digging. Whatever the rock holds becomes visible for a
+   * little way around, since an ore body runs in a band rather than sitting in
+   * a single spot.
+   */
+  private completeSurvey(settler: Settler): void {
+    const found = this.world.resource[settler.taskPoint] as Resource;
+
+    for (const point of this.world.grid.pointsWithin(settler.taskPoint, GEOLOGIST_REVEAL)) {
+      this.world.resourceKnown[point] = 1;
+    }
+
+    if (found !== Resource.None && this.world.resourceAmount[settler.taskPoint]! > 0) {
+      this.note(`A geologist finds ${RESOURCE_NAMES[found]}.`);
+    }
+
+    this.beginSurvey(settler);
+  }
+
   private taskDuration(settler: Settler): number {
+    if (settler.profession === Profession.Geologist) return GEOLOGIST_WORK_TICKS;
+
     const building = this.buildings.get(settler.building);
     if (!building) return 1;
     const behaviour = buildingInfo(building.type).behaviour;
     if (behaviour.kind === 'harvest' || behaviour.kind === 'plant') return behaviour.workTicks;
-    if (behaviour.kind === 'extract') return behaviour.workTicks;
+    if (behaviour.kind === 'extract' || behaviour.kind === 'farm') return behaviour.workTicks;
     return 60;
   }
 
   /** A woodcutter has finished felling, or a forester has finished planting. */
   private completeTask(settler: Settler): void {
+    if (settler.profession === Profession.Geologist) {
+      this.completeSurvey(settler);
+      return;
+    }
+
     const building = this.buildings.get(settler.building);
     if (!building) {
       this.dismissSettler(settler.id);
@@ -997,6 +1161,21 @@ export class Simulation {
         this.world.object[point] = MapObject.Tree;
         this.world.objectData[point] = 0;
         this.growingTrees.push(point);
+      }
+    } else if (behaviour.kind === 'farm') {
+      // Whichever job he walked out for: a ripe field is cut back to bare
+      // earth, and bare earth is sown.
+      if (
+        this.world.object[point] === MapObject.Field &&
+        this.world.objectData[point]! >= FIELD_FULLY_GROWN
+      ) {
+        this.world.object[point] = MapObject.None;
+        this.world.objectData[point] = 0;
+        settler.carrying = behaviour.output;
+      } else if (this.world.object[point] === MapObject.None) {
+        this.world.object[point] = MapObject.Field;
+        this.world.objectData[point] = 0;
+        this.growingFields.push(point);
       }
     } else if (behaviour.kind === 'extract') {
       if (this.world.resource[point] === behaviour.resource && this.world.resourceAmount[point]! > 0) {
@@ -1261,6 +1440,15 @@ export class Simulation {
       return;
     }
 
+    // An outpost holds its ground on its own. It claimed the territory the
+    // moment it was finished and asks nothing of anybody after that, so it must
+    // not fall into the staffing branch below and sit reporting a worker it
+    // will never want.
+    if (info.worker === null) {
+      building.status = BuildingStatus.Working;
+      return;
+    }
+
     // Anything else needs somebody to work it.
     if (building.worker === 0) {
       building.status = this.storeReaches(building)
@@ -1278,6 +1466,7 @@ export class Simulation {
     switch (behaviour.kind) {
       case 'harvest':
       case 'plant':
+      case 'farm':
         this.updateFieldWork(building, behaviour);
         return;
       case 'extract':
@@ -1374,6 +1563,29 @@ export class Simulation {
     this.note(`${info.name} completed.`);
   }
 
+  /**
+   * Where the worker of a building should go next.
+   *
+   * A farmer is the only one with two jobs: he cuts a ripe field if there is
+   * one, and sows a fresh one otherwise. Reaping first is what keeps a farm
+   * from carpeting its whole radius before harvesting any of it.
+   */
+  private workTarget(centre: number, behaviour: FieldWork): number | undefined {
+    switch (behaviour.kind) {
+      case 'harvest':
+        return this.findObject(centre, behaviour.radius, behaviour.object);
+      case 'extract':
+        return this.findResource(centre, behaviour.radius, behaviour.resource, true);
+      case 'farm':
+        return (
+          this.findObject(centre, behaviour.radius, MapObject.Field) ??
+          this.findGrowingSpot(centre, behaviour.radius, 'farmable')
+        );
+      case 'plant':
+        return this.findGrowingSpot(centre, behaviour.radius, 'plantable');
+    }
+  }
+
   private updateFieldWork(building: Building, behaviour: FieldWork): void {
     const worker = this.settlers.get(building.worker);
     if (!worker || worker.state !== SettlerState.AtWork) return;
@@ -1384,12 +1596,7 @@ export class Simulation {
       return;
     }
 
-    const target =
-      behaviour.kind === 'harvest'
-        ? this.findObject(building.point, behaviour.radius, behaviour.object)
-        : behaviour.kind === 'extract'
-          ? this.findResource(building.point, behaviour.radius, behaviour.resource, true)
-          : this.findPlantingSpot(building.point, behaviour.radius);
+    const target = this.workTarget(building.point, behaviour);
 
     if (target === undefined) {
       building.status = BuildingStatus.Exhausted;
@@ -1424,7 +1631,13 @@ export class Simulation {
       }
     }
 
-    const source = this.findResource(building.point, behaviour.radius, behaviour.resource);
+    // A shaft reaches the seam around it, not just the speck of ground it
+    // stands on: worldgen scatters ore point by point, so a mine confined to
+    // its own point would report itself exhausted almost at once. The radius in
+    // the data stays zero — `updateBuilding` reads a non-zero one as "the
+    // worker goes outdoors", which is right for a fisherman and wrong here.
+    const reach = Math.max(behaviour.radius, SEAM_RADIUS);
+    const source = this.findResource(building.point, reach, behaviour.resource);
     if (source === undefined) {
       building.status = BuildingStatus.Exhausted;
       return;
@@ -1463,7 +1676,31 @@ export class Simulation {
     for (let i = 0; i < behaviour.inputs.length; i += 1) {
       building.inputs[i] = building.inputs[i]! - behaviour.inputs[i]!.count;
     }
-    building.output = behaviour.output;
+    building.output = behaviour.alternatives
+      ? this.scarcest(building.owner, behaviour.alternatives)
+      : behaviour.output;
+  }
+
+  /**
+   * Whichever of these wares the player holds fewest of.
+   *
+   * Ties go to the earliest in the list rather than to iteration order, so a
+   * workshop's choice is a function of the game state alone — no clock, no
+   * random draw, and identical in a replay.
+   */
+  private scarcest(owner: number, choices: readonly Ware[]): Ware {
+    let best = choices[0]!;
+    let bestHeld = Number.POSITIVE_INFINITY;
+
+    for (const ware of choices) {
+      const held = this.storedWare(owner, ware);
+      if (held < bestHeld) {
+        bestHeld = held;
+        best = ware;
+      }
+    }
+
+    return best;
   }
 
   /** Moves a finished ware out onto the building's flag. */
@@ -1816,10 +2053,15 @@ export class Simulation {
   // ------------------------------------------------------------- map search
 
   /** The nearest point within `radius` carrying the given object. */
+  /**
+   * The nearest object of a kind worth working. Trees and fields both have to
+   * be ripe first — a sapling is not timber and green corn is not a crop.
+   */
   private findObject(centre: number, radius: number, object: MapObject): number | undefined {
     for (const point of this.world.grid.pointsWithin(centre, radius)) {
       if (this.world.object[point] !== object) continue;
       if (object === MapObject.Tree && this.world.objectData[point]! < TREE_FULLY_GROWN) continue;
+      if (object === MapObject.Field && this.world.objectData[point]! < FIELD_FULLY_GROWN) continue;
       return point;
     }
     return undefined;
@@ -1849,14 +2091,20 @@ export class Simulation {
   }
 
   /**
-   * Open ground a forester can plant on.
+   * Open ground something can be put in: saplings for a forester, corn for a
+   * farmer. The two differ only in which terrain will take it, so they share
+   * the search.
    *
    * The spot is drawn at random from everything suitable rather than taken in
    * scan order, so a forester grows a natural-looking wood instead of a tidy
    * ring around its hut. The draw comes from the simulation's seeded generator,
    * so it stays reproducible.
    */
-  private findPlantingSpot(centre: number, radius: number): number | undefined {
+  private findGrowingSpot(
+    centre: number,
+    radius: number,
+    property: 'plantable' | 'farmable',
+  ): number | undefined {
     const suitable: number[] = [];
 
     for (const point of this.world.grid.pointsWithin(centre, radius)) {
@@ -1866,15 +2114,15 @@ export class Simulation {
       if (this.world.roadCount(point) > 0) continue;
 
       this.world.trianglesAroundPoint(point, TRIANGLE_SCRATCH);
-      let plantable = true;
+      let usable = true;
       for (let t = 0; t < 6; t += 1) {
         const triangle = TRIANGLE_SCRATCH[t]!;
-        if (triangle === OUT_OF_BOUNDS || !this.world.propertiesOfTriangle(triangle).plantable) {
-          plantable = false;
+        if (triangle === OUT_OF_BOUNDS || !this.world.propertiesOfTriangle(triangle)[property]) {
+          usable = false;
           break;
         }
       }
-      if (plantable) suitable.push(point);
+      if (usable) suitable.push(point);
     }
 
     return this.rng.pick(suitable);
@@ -1892,6 +2140,21 @@ export class Simulation {
       if (stage < TREE_FULLY_GROWN) stillGrowing.push(point);
     }
     this.growingTrees = stillGrowing;
+  }
+
+  /** Corn ripens faster than timber, which is the point of a farm. */
+  private growFields(): void {
+    if (this.tick % FIELD_GROWTH_INTERVAL !== 0) return;
+
+    const stillGrowing: number[] = [];
+    for (const point of this.growingFields) {
+      if (this.world.object[point] !== MapObject.Field) continue;
+
+      const stage = this.world.objectData[point]! + 1;
+      this.world.objectData[point] = Math.min(FIELD_FULLY_GROWN, stage);
+      if (stage < FIELD_FULLY_GROWN) stillGrowing.push(point);
+    }
+    this.growingFields = stillGrowing;
   }
 
   // -------------------------------------------------------------- saving
@@ -1933,13 +2196,20 @@ export class Simulation {
       buildings: { pool: this.buildings.savePool(), items: this.buildings.all() },
       settlers: { pool: this.settlers.savePool(), items: this.settlers.all() },
       growingTrees: [...this.growingTrees],
+      growingFields: [...this.growingFields],
       events: [...this.events],
     };
   }
 
-  /** Rebuilds a game from `toSnapshot`. */
+  /**
+   * Rebuilds a game from `toSnapshot`.
+   *
+   * Older snapshots are accepted and their missing pieces defaulted below; only
+   * a snapshot from a future version is genuinely unreadable, since there is no
+   * telling what it means.
+   */
   static fromSnapshot(snapshot: SimulationSnapshot): Simulation {
-    if (snapshot.version !== SAVE_VERSION) {
+    if (snapshot.version > SAVE_VERSION) {
       throw new Error(`unsupported save version ${snapshot.version}`);
     }
 
@@ -1965,13 +2235,20 @@ export class Simulation {
     simulation.tick = snapshot.tick;
     simulation.rng = Rng.restore(snapshot.rng);
     simulation.growingTrees = [...snapshot.growingTrees];
+    // Saves written before farms existed have no field list, and no fields.
+    simulation.growingFields = [...(snapshot.growingFields ?? [])];
     simulation.players.push(...snapshot.players.map((player) => ({ ...player })));
     simulation.events.push(...snapshot.events);
 
     simulation.flags.adopt(snapshot.flags.pool, snapshot.flags.items);
     simulation.roads.adopt(snapshot.roads.pool, snapshot.roads.items);
     simulation.buildings.adopt(snapshot.buildings.pool, snapshot.buildings.items);
-    simulation.settlers.adopt(snapshot.settlers.pool, snapshot.settlers.items);
+    // Version 1 settlers have no survey counter; nobody in such a save is a
+    // geologist, so nought is not merely a safe default but the right one.
+    simulation.settlers.adopt(
+      snapshot.settlers.pool,
+      snapshot.settlers.items.map((settler) => ({ ...settler, surveysLeft: settler.surveysLeft ?? 0 })),
+    );
 
     return simulation;
   }

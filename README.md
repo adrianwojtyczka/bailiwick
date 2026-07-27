@@ -86,15 +86,24 @@ keeps the download to a single script and makes offline play immediate.
 ## What is in, and what is next
 
 Playable now: the road and carrier network, construction sites and their
-material deliveries, settlers taking up trades, territory, saving and export,
-and the wood, board, stone, water and fish chains.
+material deliveries, settlers taking up trades, saving and export, and these
+chains —
 
-Planned, and already expressible in the existing data tables:
+- **Wood and stone** — woodcutters, foresters, sawmills, quarries.
+- **Food** — wells, fisheries, farms sowing and reaping their own fields,
+  mills, bakeries, pig farms, slaughterhouses, breweries, donkey breeders.
+- **Mining** — geologists who go out and survey the rock, and the coal, iron,
+  gold and granite mines sunk on what they find. Miners must be fed.
+- **Metal and tools** — iron smelters, mints, armouries, and a metalworks that
+  makes whichever tool the player is shortest of.
+- **Territory** — outposts from a barracks to a fortress, each claiming the
+  ground that lets a province reach the mountains.
 
-- **Food and mining** — farms, mills, bakeries, wells, hunters, pig farms,
-  breweries; geologists and the coal, iron, gold and granite mines they find.
-- **Metal and military** — smelters, mints, armouries and toolmakers; barracks
-  through fortresses, soldier ranks, and attacking across a border.
+Still to come:
+
+- **Soldiers** — garrisons for the outposts, ranks bought with coin and beer,
+  and attacking across a border. The outposts hold ground but stand empty.
+- **Hunters** — waiting on game animals, which the map does not yet carry.
 - **Expansion** — shipyards, harbours, expeditions, catapults, fog of war.
 - **Opponents** — computer players, statistics, and scenario maps.
 

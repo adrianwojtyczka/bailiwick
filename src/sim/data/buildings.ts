@@ -2,7 +2,7 @@ import type { BuildingSize } from '../world/buildspace';
 import { BuildingSize as Size } from '../world/buildspace';
 import { MapObject, Resource } from '../world/terrain';
 import { Profession } from './professions';
-import { Ware } from './wares';
+import { MINER_FOODS, Ware } from './wares';
 
 export interface WareAmount {
   readonly ware: Ware;
@@ -37,6 +37,17 @@ export type BuildingBehaviour =
       readonly radius: number;
       readonly workTicks: number;
     }
+  /**
+   * Sows fields on the ground around it and reaps them once they ripen — a
+   * cycle of planting and harvesting in one trade, which is what makes a farm
+   * different from a forester and a woodcutter working side by side.
+   */
+  | {
+      readonly kind: 'farm';
+      readonly output: Ware;
+      readonly radius: number;
+      readonly workTicks: number;
+    }
   /** Draws an underground resource: water, fish, ore. */
   | {
       readonly kind: 'extract';
@@ -55,6 +66,13 @@ export type BuildingBehaviour =
       readonly inputs: readonly WareAmount[];
       readonly output: Ware;
       readonly workTicks: number;
+      /**
+       * A workshop that can turn its hand to several things makes whichever of
+       * these the player is shortest of, and `output` is merely the first
+       * guess. This is how one metalworks keeps every trade in tools without
+       * asking the player to manage a production queue.
+       */
+      readonly alternatives?: readonly Ware[];
     }
   /** Holds territory and garrisons soldiers. */
   | {
@@ -108,10 +126,37 @@ export const BuildingType = {
 
 export type BuildingType = (typeof BuildingType)[keyof typeof BuildingType];
 
+/**
+ * How the build menu groups a building. With most of the roster now available
+ * a single flat grid runs off the bottom of a phone, and a player looking for
+ * a bakery should not have to read past four kinds of mine to find it.
+ */
+export const BuildingCategory = {
+  Storage: 'Storage',
+  WoodAndStone: 'Wood and stone',
+  Food: 'Food',
+  Mining: 'Mining',
+  MetalAndTools: 'Metal and tools',
+  Military: 'Outposts',
+} as const;
+
+export type BuildingCategory = (typeof BuildingCategory)[keyof typeof BuildingCategory];
+
+/** The order sections appear in the build menu. */
+export const CATEGORY_ORDER: readonly BuildingCategory[] = [
+  BuildingCategory.WoodAndStone,
+  BuildingCategory.Food,
+  BuildingCategory.Mining,
+  BuildingCategory.MetalAndTools,
+  BuildingCategory.Military,
+  BuildingCategory.Storage,
+];
+
 export interface BuildingInfo {
   readonly id: BuildingType;
   readonly name: string;
   readonly size: BuildingSize;
+  readonly category: BuildingCategory;
   /** Materials a construction site must receive before it can be finished. */
   readonly cost: readonly WareAmount[];
   /** Ticks of a builder's work the site needs, on top of its materials. */
@@ -127,11 +172,30 @@ export interface BuildingInfo {
 const boards = (count: number): WareAmount => ({ ware: Ware.Board, count });
 const stones = (count: number): WareAmount => ({ ware: Ware.Stone, count });
 
+/**
+ * Every tool a trade in this release asks for. The metalworks makes whichever
+ * of them is scarcest, so no trade can be shut out for good by an unlucky run
+ * of losses.
+ */
+const TOOLS: readonly Ware[] = [
+  Ware.Hammer,
+  Ware.Axe,
+  Ware.Saw,
+  Ware.PickAxe,
+  Ware.Shovel,
+  Ware.Crucible,
+  Ware.FishingRod,
+  Ware.Scythe,
+  Ware.Cleaver,
+  Ware.RollingPin,
+];
+
 export const BUILDINGS: readonly BuildingInfo[] = [
   {
     id: BuildingType.Headquarters,
     name: 'Headquarters',
     size: Size.Castle,
+    category: BuildingCategory.Storage,
     cost: [],
     buildTicks: 0,
     worker: null,
@@ -143,6 +207,7 @@ export const BUILDINGS: readonly BuildingInfo[] = [
     id: BuildingType.Storehouse,
     name: 'Storehouse',
     size: Size.House,
+    category: BuildingCategory.Storage,
     cost: [boards(3), stones(3)],
     buildTicks: 420,
     worker: null,
@@ -155,6 +220,7 @@ export const BUILDINGS: readonly BuildingInfo[] = [
     id: BuildingType.Woodcutter,
     name: "Woodcutter's hut",
     size: Size.Hut,
+    category: BuildingCategory.WoodAndStone,
     cost: [boards(2)],
     buildTicks: 220,
     worker: Profession.Woodcutter,
@@ -172,6 +238,7 @@ export const BUILDINGS: readonly BuildingInfo[] = [
     id: BuildingType.Forester,
     name: "Forester's hut",
     size: Size.Hut,
+    category: BuildingCategory.WoodAndStone,
     cost: [boards(2)],
     buildTicks: 220,
     worker: Profession.Forester,
@@ -183,6 +250,7 @@ export const BUILDINGS: readonly BuildingInfo[] = [
     id: BuildingType.Sawmill,
     name: 'Sawmill',
     size: Size.House,
+    category: BuildingCategory.WoodAndStone,
     cost: [boards(3), stones(2)],
     buildTicks: 400,
     worker: Profession.Carpenter,
@@ -199,6 +267,7 @@ export const BUILDINGS: readonly BuildingInfo[] = [
     id: BuildingType.Quarry,
     name: 'Quarry',
     size: Size.Hut,
+    category: BuildingCategory.WoodAndStone,
     cost: [boards(2)],
     buildTicks: 220,
     worker: Profession.Stonemason,
@@ -216,6 +285,7 @@ export const BUILDINGS: readonly BuildingInfo[] = [
     id: BuildingType.Well,
     name: 'Well',
     size: Size.Hut,
+    category: BuildingCategory.Food,
     cost: [boards(3), stones(1)],
     buildTicks: 240,
     worker: Profession.WellDigger,
@@ -234,6 +304,7 @@ export const BUILDINGS: readonly BuildingInfo[] = [
     id: BuildingType.Fishery,
     name: "Fisherman's hut",
     size: Size.Hut,
+    category: BuildingCategory.Food,
     cost: [boards(2)],
     buildTicks: 220,
     worker: Profession.Fisher,
@@ -253,6 +324,7 @@ export const BUILDINGS: readonly BuildingInfo[] = [
     id: BuildingType.Hunter,
     name: "Hunter's hut",
     size: Size.Hut,
+    category: BuildingCategory.Food,
     cost: [boards(2)],
     buildTicks: 220,
     worker: Profession.Hunter,
@@ -264,17 +336,19 @@ export const BUILDINGS: readonly BuildingInfo[] = [
     id: BuildingType.Farm,
     name: 'Farm',
     size: Size.Castle,
+    category: BuildingCategory.Food,
     cost: [boards(3), stones(3)],
     buildTicks: 620,
     worker: Profession.Farmer,
-    behaviour: { kind: 'unimplemented' },
-    available: false,
+    behaviour: { kind: 'farm', output: Ware.Grain, radius: 5, workTicks: 170 },
+    available: true,
     description: 'Sows and reaps grain on the surrounding fields.',
   },
   {
     id: BuildingType.Mill,
     name: 'Mill',
     size: Size.House,
+    category: BuildingCategory.Food,
     cost: [boards(3), stones(3)],
     buildTicks: 400,
     worker: Profession.Miller,
@@ -284,13 +358,14 @@ export const BUILDINGS: readonly BuildingInfo[] = [
       output: Ware.Flour,
       workTicks: 130,
     },
-    available: false,
+    available: true,
     description: 'Grinds grain into flour.',
   },
   {
     id: BuildingType.Bakery,
     name: 'Bakery',
     size: Size.House,
+    category: BuildingCategory.Food,
     cost: [boards(2), stones(3)],
     buildTicks: 400,
     worker: Profession.Baker,
@@ -303,13 +378,14 @@ export const BUILDINGS: readonly BuildingInfo[] = [
       output: Ware.Bread,
       workTicks: 150,
     },
-    available: false,
+    available: true,
     description: 'Bakes bread, the staple that keeps mines working.',
   },
   {
     id: BuildingType.PigFarm,
     name: 'Pig farm',
     size: Size.Castle,
+    category: BuildingCategory.Food,
     cost: [boards(3), stones(3)],
     buildTicks: 620,
     worker: Profession.PigBreeder,
@@ -322,13 +398,14 @@ export const BUILDINGS: readonly BuildingInfo[] = [
       output: Ware.Ham,
       workTicks: 200,
     },
-    available: false,
+    available: true,
     description: 'Fattens pigs on grain and water.',
   },
   {
     id: BuildingType.Slaughterhouse,
     name: 'Slaughterhouse',
     size: Size.House,
+    category: BuildingCategory.Food,
     cost: [boards(3), stones(2)],
     buildTicks: 400,
     worker: Profession.Butcher,
@@ -338,13 +415,14 @@ export const BUILDINGS: readonly BuildingInfo[] = [
       output: Ware.Meat,
       workTicks: 130,
     },
-    available: false,
+    available: true,
     description: 'Turns pigs into meat.',
   },
   {
     id: BuildingType.Brewery,
     name: 'Brewery',
     size: Size.House,
+    category: BuildingCategory.Food,
     cost: [boards(3), stones(3)],
     buildTicks: 400,
     worker: Profession.Brewer,
@@ -357,13 +435,14 @@ export const BUILDINGS: readonly BuildingInfo[] = [
       output: Ware.Beer,
       workTicks: 160,
     },
-    available: false,
+    available: true,
     description: 'Brews the beer that turns settlers into soldiers.',
   },
   {
     id: BuildingType.DonkeyBreeder,
     name: 'Donkey breeder',
     size: Size.Castle,
+    category: BuildingCategory.Food,
     cost: [boards(3), stones(3)],
     buildTicks: 620,
     worker: Profession.DonkeyBreeder,
@@ -376,7 +455,7 @@ export const BUILDINGS: readonly BuildingInfo[] = [
       output: Ware.Donkey,
       workTicks: 220,
     },
-    available: false,
+    available: true,
     description: 'Raises donkeys to speed goods along busy roads.',
   },
 
@@ -384,6 +463,7 @@ export const BUILDINGS: readonly BuildingInfo[] = [
     id: BuildingType.CoalMine,
     name: 'Coal mine',
     size: Size.Mine,
+    category: BuildingCategory.Mining,
     cost: [boards(4)],
     buildTicks: 360,
     worker: Profession.Miner,
@@ -394,15 +474,16 @@ export const BUILDINGS: readonly BuildingInfo[] = [
       radius: 0,
       workTicks: 180,
       depletes: true,
-      food: [Ware.Bread, Ware.Fish, Ware.Meat],
+      food: MINER_FOODS,
     },
-    available: false,
+    available: true,
     description: 'Digs coal. Miners must be fed.',
   },
   {
     id: BuildingType.IronMine,
     name: 'Iron mine',
     size: Size.Mine,
+    category: BuildingCategory.Mining,
     cost: [boards(4)],
     buildTicks: 360,
     worker: Profession.Miner,
@@ -413,15 +494,16 @@ export const BUILDINGS: readonly BuildingInfo[] = [
       radius: 0,
       workTicks: 180,
       depletes: true,
-      food: [Ware.Bread, Ware.Fish, Ware.Meat],
+      food: MINER_FOODS,
     },
-    available: false,
+    available: true,
     description: 'Digs iron ore. Miners must be fed.',
   },
   {
     id: BuildingType.GoldMine,
     name: 'Gold mine',
     size: Size.Mine,
+    category: BuildingCategory.Mining,
     cost: [boards(4)],
     buildTicks: 360,
     worker: Profession.Miner,
@@ -432,15 +514,16 @@ export const BUILDINGS: readonly BuildingInfo[] = [
       radius: 0,
       workTicks: 200,
       depletes: true,
-      food: [Ware.Bread, Ware.Fish, Ware.Meat],
+      food: MINER_FOODS,
     },
-    available: false,
+    available: true,
     description: 'Digs gold ore for the mint.',
   },
   {
     id: BuildingType.GraniteMine,
     name: 'Granite mine',
     size: Size.Mine,
+    category: BuildingCategory.Mining,
     cost: [boards(4)],
     buildTicks: 360,
     worker: Profession.Miner,
@@ -451,9 +534,9 @@ export const BUILDINGS: readonly BuildingInfo[] = [
       radius: 0,
       workTicks: 180,
       depletes: true,
-      food: [Ware.Bread, Ware.Fish, Ware.Meat],
+      food: MINER_FOODS,
     },
-    available: false,
+    available: true,
     description: 'Wins stone from the mountain when the quarries run out.',
   },
 
@@ -461,6 +544,7 @@ export const BUILDINGS: readonly BuildingInfo[] = [
     id: BuildingType.IronSmelter,
     name: 'Iron smelter',
     size: Size.House,
+    category: BuildingCategory.MetalAndTools,
     cost: [boards(2), stones(3)],
     buildTicks: 400,
     worker: Profession.IronFounder,
@@ -473,13 +557,14 @@ export const BUILDINGS: readonly BuildingInfo[] = [
       output: Ware.Iron,
       workTicks: 160,
     },
-    available: false,
+    available: true,
     description: 'Smelts ore and coal into iron.',
   },
   {
     id: BuildingType.Mint,
     name: 'Mint',
     size: Size.House,
+    category: BuildingCategory.MetalAndTools,
     cost: [boards(2), stones(3)],
     buildTicks: 400,
     worker: Profession.Minter,
@@ -492,13 +577,14 @@ export const BUILDINGS: readonly BuildingInfo[] = [
       output: Ware.Coin,
       workTicks: 180,
     },
-    available: false,
+    available: true,
     description: 'Strikes coins, which promote soldiers in your strongholds.',
   },
   {
     id: BuildingType.Metalworks,
     name: 'Metalworks',
     size: Size.House,
+    category: BuildingCategory.MetalAndTools,
     cost: [boards(2), stones(3)],
     buildTicks: 400,
     worker: Profession.Metalworker,
@@ -509,15 +595,17 @@ export const BUILDINGS: readonly BuildingInfo[] = [
         { ware: Ware.Board, count: 1 },
       ],
       output: Ware.Hammer,
+      alternatives: TOOLS,
       workTicks: 170,
     },
-    available: false,
+    available: true,
     description: 'Makes the tools every trade depends on.',
   },
   {
     id: BuildingType.Armoury,
     name: 'Armoury',
     size: Size.House,
+    category: BuildingCategory.MetalAndTools,
     cost: [boards(2), stones(3)],
     buildTicks: 400,
     worker: Profession.Armourer,
@@ -530,7 +618,7 @@ export const BUILDINGS: readonly BuildingInfo[] = [
       output: Ware.Sword,
       workTicks: 180,
     },
-    available: false,
+    available: true,
     description: 'Forges swords and shields.',
   },
 
@@ -538,50 +626,55 @@ export const BUILDINGS: readonly BuildingInfo[] = [
     id: BuildingType.Barracks,
     name: 'Barracks',
     size: Size.Hut,
+    category: BuildingCategory.Military,
     cost: [boards(2), stones(2)],
     buildTicks: 260,
     worker: null,
     behaviour: { kind: 'military', garrison: 2, radius: 8 },
-    available: false,
-    description: 'The smallest outpost. Claims a little ground.',
+    available: true,
+    description: 'The smallest outpost. Claims a little ground. No garrison yet.',
   },
   {
     id: BuildingType.Guardhouse,
     name: 'Guardhouse',
     size: Size.House,
+    category: BuildingCategory.Military,
     cost: [boards(3), stones(3)],
     buildTicks: 400,
     worker: null,
     behaviour: { kind: 'military', garrison: 3, radius: 9 },
-    available: false,
-    description: 'A sturdier post for a wider claim.',
+    available: true,
+    description: 'A sturdier post for a wider claim. No garrison yet.',
   },
   {
     id: BuildingType.WatchTower,
     name: 'Watchtower',
     size: Size.House,
+    category: BuildingCategory.Military,
     cost: [boards(4), stones(3)],
     buildTicks: 480,
     worker: null,
     behaviour: { kind: 'military', garrison: 6, radius: 11 },
-    available: false,
-    description: 'Holds a good stretch of frontier.',
+    available: true,
+    description: 'Holds a good stretch of frontier. No garrison yet.',
   },
   {
     id: BuildingType.Fortress,
     name: 'Fortress',
     size: Size.Castle,
+    category: BuildingCategory.Military,
     cost: [boards(5), stones(5)],
     buildTicks: 700,
     worker: null,
     behaviour: { kind: 'military', garrison: 9, radius: 13 },
-    available: false,
-    description: 'The strongest hold, and the widest claim.',
+    available: true,
+    description: 'The strongest hold, and the widest claim. No garrison yet.',
   },
   {
     id: BuildingType.LookoutTower,
     name: 'Lookout tower',
     size: Size.Hut,
+    category: BuildingCategory.Military,
     cost: [boards(4), stones(2)],
     buildTicks: 300,
     worker: null,
@@ -594,6 +687,7 @@ export const BUILDINGS: readonly BuildingInfo[] = [
     id: BuildingType.Shipyard,
     name: 'Shipyard',
     size: Size.House,
+    category: BuildingCategory.Storage,
     cost: [boards(3), stones(3)],
     buildTicks: 460,
     worker: Profession.Shipwright,
@@ -605,6 +699,7 @@ export const BUILDINGS: readonly BuildingInfo[] = [
     id: BuildingType.Harbour,
     name: 'Harbour',
     size: Size.Castle,
+    category: BuildingCategory.Storage,
     cost: [boards(6), stones(6)],
     buildTicks: 800,
     worker: null,
@@ -616,6 +711,7 @@ export const BUILDINGS: readonly BuildingInfo[] = [
     id: BuildingType.Catapult,
     name: 'Catapult',
     size: Size.House,
+    category: BuildingCategory.Military,
     cost: [boards(4), stones(2)],
     buildTicks: 420,
     worker: null,

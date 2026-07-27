@@ -140,6 +140,10 @@ export type MapObject = (typeof MapObject)[keyof typeof MapObject];
 export const TREE_FULLY_GROWN = 4;
 export const TREE_MAX_GROWTH = 4;
 
+/** A field is only worth cutting once it has reached this growth stage. */
+export const FIELD_FULLY_GROWN = 3;
+export const FIELD_MAX_GROWTH = 3;
+
 /** Underground resources, revealed by geologists and worked by mines. */
 export const Resource = {
   None: 0,

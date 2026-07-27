@@ -125,3 +125,57 @@ describe('saving and loading', () => {
     await expect(loadSimulation(new TextEncoder().encode('not a save'))).rejects.toThrow();
   });
 });
+
+describe('saves from an older version', () => {
+  /** Rewrites a current save as a version 1 file, dropping what v1 lacked. */
+  async function asVersionOne(bytes: Uint8Array): Promise<Uint8Array> {
+    const stream = new Blob([bytes as BlobPart])
+      .stream()
+      .pipeThrough(new DecompressionStream('gzip'));
+    const parsed = JSON.parse(await new Response(stream).text()) as Record<string, unknown>;
+
+    parsed.version = 1;
+    delete parsed.growingFields;
+    const settlers = parsed.settlers as { items: Record<string, unknown>[] };
+    for (const settler of settlers.items) delete settler.surveysLeft;
+
+    const out = new Blob([JSON.stringify(parsed)])
+      .stream()
+      .pipeThrough(new CompressionStream('gzip'));
+    return new Uint8Array(await new Response(out).arrayBuffer());
+  }
+
+  it('still loads, filling in what the older format left out', async () => {
+    const original = playedGame();
+    const old = await asVersionOne(await encodeSave(original, 'an old game'));
+
+    const restored = await loadSimulation(old);
+
+    // Everything the old format did carry survives intact.
+    expect(restored.tick).toBe(original.tick);
+    expect(restored.settlers.count).toBe(original.settlers.count);
+    expect(restored.storedWare(PLAYER, Ware.Board)).toBe(
+      original.storedWare(PLAYER, Ware.Board),
+    );
+    // And the fields it predates default to nothing rather than to undefined.
+    for (const settler of restored.settlers.all()) {
+      expect(settler.surveysLeft).toBe(0);
+    }
+  });
+
+  it('refuses a save from a newer version it cannot understand', async () => {
+    const bytes = await encodeSave(playedGame(), 'from the future');
+    const stream = new Blob([bytes as BlobPart])
+      .stream()
+      .pipeThrough(new DecompressionStream('gzip'));
+    const parsed = JSON.parse(await new Response(stream).text()) as Record<string, unknown>;
+    parsed.version = 999;
+
+    const out = new Blob([JSON.stringify(parsed)])
+      .stream()
+      .pipeThrough(new CompressionStream('gzip'));
+    const future = new Uint8Array(await new Response(out).arrayBuffer());
+
+    await expect(loadSimulation(future)).rejects.toThrow(/newer version/);
+  });
+});

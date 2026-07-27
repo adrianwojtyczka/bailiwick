@@ -1,10 +1,11 @@
 import type { BuildingInfo, BuildingType } from '../sim/data/buildings';
-import { AVAILABLE_BUILDINGS, buildingInfo } from '../sim/data/buildings';
+import { AVAILABLE_BUILDINGS, buildingInfo, CATEGORY_ORDER } from '../sim/data/buildings';
 import { Ware, wareInfo } from '../sim/data/wares';
 import type { Building } from '../sim/entities/types';
 import { BuildingState, BuildingStatus } from '../sim/entities/types';
 import type { Simulation } from '../sim/simulation';
 import { BuildSpace, canHostSize, evaluateBuildSpace } from '../sim/world/buildspace';
+import { Resource, RESOURCE_NAMES } from '../sim/world/terrain';
 import { button, clear, el } from './dom';
 
 /** Wares shown permanently in the top bar. */
@@ -28,6 +29,7 @@ export interface HudCallbacks {
   demolishRoad(point: number): void;
   startRoad(flagPoint: number): void;
   placeFlag(point: number): void;
+  sendGeologist(flagPoint: number): void;
   setSpeed(speed: number): void;
   save(): void;
   exportSave(): void;
@@ -189,8 +191,9 @@ export class Hud {
         this.toggleBuildMenu(),
       ),
       button(speedLabel, 'action', () => {
-        // Cycles pause, normal, fast — the three speeds anybody actually uses.
-        const next = speed === 0 ? 1 : speed === 1 ? 3 : 0;
+        // Cycles normal, double, quadruple, paused. One button rather than a
+        // row of them: on a phone the map is worth more than the chrome.
+        const next = speed === 1 ? 2 : speed === 2 ? 4 : speed === 4 ? 0 : 1;
         this.callbacks.setSpeed(next);
       }),
     );
@@ -206,33 +209,41 @@ export class Hud {
     clear(this.buildMenu);
     this.buildMenu.append(el('h2', { class: 'buildmenu__title' }, 'Build'));
 
-    const grid = el('div', { class: 'buildmenu__grid' });
+    // Grouped rather than one long grid: with most of the roster available the
+    // flat list ran well off the bottom of a phone.
+    for (const category of CATEGORY_ORDER) {
+      const inCategory = AVAILABLE_BUILDINGS.filter((info) => info.category === category);
+      if (inCategory.length === 0) continue;
 
-    for (const info of AVAILABLE_BUILDINGS) {
-      const cost = info.cost
-        .map((item) => `${item.count} ${wareInfo(item.ware).name.toLowerCase()}`)
-        .join(', ');
+      const grid = el('div', { class: 'buildmenu__grid' });
+      for (const info of inCategory) grid.append(this.buildCard(info));
 
-      const card = el(
-        'button',
-        { class: 'card', type: 'button' },
-        el('span', { class: 'card__name' }, info.name),
-        el('span', { class: 'card__cost' }, cost || 'no materials'),
-        el('span', { class: 'card__note' }, info.description),
-      );
-
-      card.addEventListener('click', (event) => {
-        event.preventDefault();
-        this.buildMenuOpen = false;
-        this.buildMenu.hidden = true;
-        this.renderActions();
-        this.callbacks.chooseBuilding(info.id);
-      });
-
-      grid.append(card);
+      this.buildMenu.append(el('h3', { class: 'buildmenu__section' }, category), grid);
     }
+  }
 
-    this.buildMenu.append(grid);
+  private buildCard(info: BuildingInfo): HTMLElement {
+    const cost = info.cost
+      .map((item) => `${item.count} ${wareInfo(item.ware).name.toLowerCase()}`)
+      .join(', ');
+
+    const card = el(
+      'button',
+      { class: 'card', type: 'button' },
+      el('span', { class: 'card__name' }, info.name),
+      el('span', { class: 'card__cost' }, cost || 'no materials'),
+      el('span', { class: 'card__note' }, info.description),
+    );
+
+    card.addEventListener('click', (event) => {
+      event.preventDefault();
+      this.buildMenuOpen = false;
+      this.buildMenu.hidden = true;
+      this.renderActions();
+      this.callbacks.chooseBuilding(info.id);
+    });
+
+    return card;
   }
 
   private renderMenu(): void {
@@ -367,6 +378,7 @@ export class Hud {
       el('h2', { class: 'panel__title' }, 'Flag'),
       el('p', { class: 'panel__status' }, waiting),
       button('Lay a road from here', 'panel__action', () => this.callbacks.startRoad(point)),
+      button('Send a geologist', 'panel__action', () => this.callbacks.sendGeologist(point)),
     ];
 
     if (flag.building === 0) {
@@ -380,22 +392,43 @@ export class Hud {
     this.showPanel(children);
   }
 
+  /**
+   * What a geologist has found here, if anything and if anyone has looked.
+   *
+   * Ground nobody has surveyed says nothing at all, rather than "nothing here"
+   * — the difference between the two is the whole point of sending a geologist.
+   */
+  private depositNote(point: number): HTMLElement | null {
+    const world = this.simulation.world;
+    if (!world.resourceKnown[point]) return null;
+
+    const resource = world.resource[point] as Resource;
+    const amount = world.resourceAmount[point] ?? 0;
+    if (resource === Resource.None || amount <= 0) {
+      return el('p', { class: 'panel__note' }, 'Surveyed: nothing below.');
+    }
+
+    return el('p', { class: 'panel__note' }, `Surveyed: ${RESOURCE_NAMES[resource]} below.`);
+  }
+
   private showGroundPanel(point: number): void {
     const world = this.simulation.world;
     const onRoad = world.roadCount(point) > 0;
     const space = evaluateBuildSpace(world, point, this.playerId);
+    const deposit = this.depositNote(point);
 
     if (space === BuildSpace.None && !onRoad) {
-      this.showPanel([
-        el('h2', { class: 'panel__title' }, 'Open ground'),
-        el('p', { class: 'panel__note' }, 'Nothing can be built here.'),
-      ]);
+      const children: HTMLElement[] = [el('h2', { class: 'panel__title' }, 'Open ground')];
+      if (deposit) children.push(deposit);
+      else children.push(el('p', { class: 'panel__note' }, 'Nothing can be built here.'));
+      this.showPanel(children);
       return;
     }
 
     const children: HTMLElement[] = [
       el('h2', { class: 'panel__title' }, onRoad ? 'Road' : 'Open ground'),
     ];
+    if (deposit) children.push(deposit);
 
     if (space !== BuildSpace.None) {
       children.push(

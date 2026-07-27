@@ -170,6 +170,11 @@ export interface Settler {
   taskPoint: number;
   /** Countdown for felling, planting, building and the like. */
   taskTimer: number;
+  /**
+   * Survey stops a geologist has left before he walks home. Zero for everyone
+   * else, and absent in version 1 saves, which predate geologists.
+   */
+  surveysLeft: number;
 }
 
 /** Ticks a settler takes to cross one lattice step on level ground. */

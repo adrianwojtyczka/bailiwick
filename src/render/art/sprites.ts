@@ -1,5 +1,6 @@
 import { BuildingType } from '../../sim/data/buildings';
 import { BuildingSize } from '../../sim/world/buildspace';
+import { FIELD_MAX_GROWTH } from '../../sim/world/terrain';
 import { PALETTE } from './palette';
 
 /**
@@ -125,6 +126,61 @@ function drawStone(ctx: CanvasRenderingContext2D, w: number, h: number, amount: 
     ctx.lineTo(x + size / 2, y - size * 0.2);
     ctx.closePath();
     outlined(ctx, '#9a9187', 0.9);
+  }
+}
+
+// ------------------------------------------------------------------ fields
+
+/**
+ * A sown field at one of its growth stages: bare furrows, green shoots, then
+ * corn standing ready to cut. The stages have to read at a glance from across
+ * the map, so they differ in colour and height rather than in detail.
+ */
+function drawField(ctx: CanvasRenderingContext2D, w: number, h: number, growth: number): void {
+  const base = h - 1;
+  const cx = w / 2;
+
+  // The turned earth is always visible under whatever is growing on it.
+  ctx.beginPath();
+  ctx.ellipse(cx, base - h * 0.1, w * 0.44, h * 0.2, 0, 0, Math.PI * 2);
+  outlined(ctx, '#7a5b3c', 0.7);
+
+  if (growth <= 0) {
+    ctx.strokeStyle = '#5d452d';
+    ctx.lineWidth = 0.7;
+    for (let furrow = -1; furrow <= 1; furrow += 1) {
+      ctx.beginPath();
+      ctx.moveTo(cx - w * 0.34, base - h * 0.1 + furrow * h * 0.09);
+      ctx.lineTo(cx + w * 0.34, base - h * 0.1 + furrow * h * 0.09);
+      ctx.stroke();
+    }
+    return;
+  }
+
+  const ripe = growth >= 1;
+  const height = h * (0.18 + 0.34 * growth);
+  ctx.strokeStyle = ripe ? '#d9b64a' : '#7fa04a';
+  ctx.lineWidth = 1.1;
+
+  for (let stalk = -3; stalk <= 3; stalk += 1) {
+    const x = cx + stalk * w * 0.11;
+    const foot = base - h * 0.1 + (stalk % 2 === 0 ? 0 : h * 0.05);
+    ctx.beginPath();
+    ctx.moveTo(x, foot);
+    ctx.lineTo(x + stalk * 0.4, foot - height);
+    ctx.stroke();
+  }
+
+  if (ripe) {
+    // Ears, so a field ready to cut is unmistakable.
+    for (let stalk = -3; stalk <= 3; stalk += 1) {
+      const x = cx + stalk * w * 0.11;
+      const foot = base - h * 0.1 + (stalk % 2 === 0 ? 0 : h * 0.05);
+      ctx.beginPath();
+      ctx.ellipse(x + stalk * 0.4, foot - height, w * 0.05, h * 0.06, 0, 0, Math.PI * 2);
+      ctx.fillStyle = '#e8cd63';
+      ctx.fill();
+    }
   }
 }
 
@@ -264,6 +320,132 @@ function glyphBanner(ctx: CanvasRenderingContext2D, x: number, y: number, s: num
   outlined(ctx, PALETTE.ochre, 0.8);
 }
 
+/** A sheaf of corn: the farm, and the mill that grinds what it grows. */
+function glyphSheaf(ctx: CanvasRenderingContext2D, x: number, y: number, s: number): void {
+  for (const lean of [-0.22, 0, 0.22]) {
+    ctx.beginPath();
+    ctx.moveTo(x + lean * s * 0.6, y + s * 0.38);
+    ctx.lineTo(x + lean * s, y - s * 0.38);
+    ctx.strokeStyle = '#d9b64a';
+    ctx.lineWidth = s * 0.12;
+    ctx.stroke();
+  }
+
+  ctx.beginPath();
+  ctx.moveTo(x - s * 0.28, y + s * 0.12);
+  ctx.lineTo(x + s * 0.28, y + s * 0.12);
+  ctx.strokeStyle = PALETTE.ink;
+  ctx.lineWidth = s * 0.1;
+  ctx.stroke();
+}
+
+/** A loaf, for the bakery. */
+function glyphLoaf(ctx: CanvasRenderingContext2D, x: number, y: number, s: number): void {
+  ctx.beginPath();
+  ctx.ellipse(x, y + s * 0.06, s * 0.42, s * 0.26, 0, Math.PI, 0);
+  ctx.lineTo(x - s * 0.42, y + s * 0.24);
+  ctx.closePath();
+  outlined(ctx, '#b9793c', 0.8);
+}
+
+/** A joint of meat, for the pig farm and the slaughterhouse. */
+function glyphJoint(ctx: CanvasRenderingContext2D, x: number, y: number, s: number): void {
+  ctx.beginPath();
+  ctx.ellipse(x, y - s * 0.04, s * 0.3, s * 0.24, 0, 0, Math.PI * 2);
+  outlined(ctx, '#c9736a', 0.8);
+
+  ctx.beginPath();
+  ctx.moveTo(x, y + s * 0.16);
+  ctx.lineTo(x, y + s * 0.42);
+  ctx.strokeStyle = PALETTE.parchment;
+  ctx.lineWidth = s * 0.14;
+  ctx.stroke();
+}
+
+/** A tankard, for the brewery. */
+function glyphTankard(ctx: CanvasRenderingContext2D, x: number, y: number, s: number): void {
+  ctx.beginPath();
+  ctx.rect(x - s * 0.26, y - s * 0.28, s * 0.46, s * 0.6);
+  outlined(ctx, '#c68a2e', 0.8);
+
+  ctx.beginPath();
+  ctx.arc(x + s * 0.3, y, s * 0.16, -Math.PI / 2, Math.PI / 2);
+  ctx.strokeStyle = PALETTE.ink;
+  ctx.lineWidth = 0.8;
+  ctx.stroke();
+}
+
+/** A pack animal, for the donkey breeder. */
+function glyphDonkey(ctx: CanvasRenderingContext2D, x: number, y: number, s: number): void {
+  ctx.beginPath();
+  ctx.ellipse(x, y, s * 0.36, s * 0.2, 0, 0, Math.PI * 2);
+  outlined(ctx, '#9b8368', 0.8);
+
+  ctx.beginPath();
+  ctx.moveTo(x + s * 0.3, y - s * 0.1);
+  ctx.lineTo(x + s * 0.44, y - s * 0.38);
+  ctx.strokeStyle = PALETTE.ink;
+  ctx.lineWidth = s * 0.12;
+  ctx.stroke();
+}
+
+/** Crossed tools over a shaft mouth, for the mines. */
+function glyphShaft(ctx: CanvasRenderingContext2D, x: number, y: number, s: number): void {
+  ctx.beginPath();
+  ctx.moveTo(x - s * 0.42, y + s * 0.34);
+  ctx.lineTo(x, y - s * 0.3);
+  ctx.lineTo(x + s * 0.42, y + s * 0.34);
+  ctx.closePath();
+  outlined(ctx, '#4a423a', 0.8);
+}
+
+/** A crucible pouring, for the smelter and the mint. */
+function glyphCrucible(ctx: CanvasRenderingContext2D, x: number, y: number, s: number): void {
+  ctx.beginPath();
+  ctx.moveTo(x - s * 0.3, y - s * 0.24);
+  ctx.lineTo(x + s * 0.3, y - s * 0.24);
+  ctx.lineTo(x + s * 0.16, y + s * 0.26);
+  ctx.lineTo(x - s * 0.16, y + s * 0.26);
+  ctx.closePath();
+  outlined(ctx, '#8d8f94', 0.8);
+
+  ctx.beginPath();
+  ctx.arc(x, y - s * 0.3, s * 0.12, 0, Math.PI * 2);
+  outlined(ctx, '#e0b53a', 0.7);
+}
+
+/** A blade, for the armoury. */
+function glyphSword(ctx: CanvasRenderingContext2D, x: number, y: number, s: number): void {
+  ctx.beginPath();
+  ctx.moveTo(x, y - s * 0.44);
+  ctx.lineTo(x + s * 0.12, y + s * 0.16);
+  ctx.lineTo(x - s * 0.12, y + s * 0.16);
+  ctx.closePath();
+  outlined(ctx, '#b6bcc4', 0.8);
+
+  ctx.beginPath();
+  ctx.moveTo(x - s * 0.28, y + s * 0.18);
+  ctx.lineTo(x + s * 0.28, y + s * 0.18);
+  ctx.strokeStyle = PALETTE.ink;
+  ctx.lineWidth = s * 0.12;
+  ctx.stroke();
+}
+
+/** A tower and its pennant, for the outposts. */
+function glyphTower(ctx: CanvasRenderingContext2D, x: number, y: number, s: number): void {
+  ctx.beginPath();
+  ctx.rect(x - s * 0.22, y - s * 0.2, s * 0.44, s * 0.56);
+  outlined(ctx, '#8d8f94', 0.8);
+
+  ctx.beginPath();
+  ctx.moveTo(x, y - s * 0.2);
+  ctx.lineTo(x, y - s * 0.5);
+  ctx.lineTo(x + s * 0.3, y - s * 0.4);
+  ctx.lineTo(x, y - s * 0.3);
+  ctx.closePath();
+  outlined(ctx, PALETTE.ochre, 0.7);
+}
+
 const BUILDING_LOOKS: Readonly<Record<number, BuildingLook>> = {
   [BuildingType.Headquarters]: { roof: '#9c4128', glyph: glyphBanner },
   [BuildingType.Storehouse]: { roof: '#8a6a3a', glyph: glyphCrate },
@@ -273,6 +455,29 @@ const BUILDING_LOOKS: Readonly<Record<number, BuildingLook>> = {
   [BuildingType.Quarry]: { roof: '#7d7269', glyph: glyphBlock },
   [BuildingType.Well]: { roof: '#5f92ad', glyph: glyphBucket },
   [BuildingType.Fishery]: { roof: '#4d7f8f', glyph: glyphFish },
+
+  [BuildingType.Farm]: { roof: '#c2a13c', glyph: glyphSheaf },
+  [BuildingType.Mill]: { roof: '#9d8348', glyph: glyphSheaf },
+  [BuildingType.Bakery]: { roof: '#b9793c', glyph: glyphLoaf },
+  [BuildingType.PigFarm]: { roof: '#b07c6c', glyph: glyphJoint },
+  [BuildingType.Slaughterhouse]: { roof: '#a94b3c', glyph: glyphJoint },
+  [BuildingType.Brewery]: { roof: '#c68a2e', glyph: glyphTankard },
+  [BuildingType.DonkeyBreeder]: { roof: '#9b8368', glyph: glyphDonkey },
+
+  [BuildingType.CoalMine]: { roof: '#4a423a', glyph: glyphShaft },
+  [BuildingType.IronMine]: { roof: '#7d5c4a', glyph: glyphShaft },
+  [BuildingType.GoldMine]: { roof: '#b8912f', glyph: glyphShaft },
+  [BuildingType.GraniteMine]: { roof: '#7d7269', glyph: glyphShaft },
+
+  [BuildingType.IronSmelter]: { roof: '#6e6a66', glyph: glyphCrucible },
+  [BuildingType.Mint]: { roof: '#b8912f', glyph: glyphCrucible },
+  [BuildingType.Metalworks]: { roof: '#6f5a44', glyph: glyphSaw },
+  [BuildingType.Armoury]: { roof: '#5d6572', glyph: glyphSword },
+
+  [BuildingType.Barracks]: { roof: '#8a6a3a', glyph: glyphTower },
+  [BuildingType.Guardhouse]: { roof: '#7b6647', glyph: glyphTower },
+  [BuildingType.WatchTower]: { roof: '#6d6a5e', glyph: glyphTower },
+  [BuildingType.Fortress]: { roof: '#5f5b54', glyph: glyphTower },
 };
 
 const DEFAULT_LOOK: BuildingLook = { roof: '#8a6a3a', glyph: glyphCrate };
@@ -424,6 +629,7 @@ function drawCrate(ctx: CanvasRenderingContext2D, w: number, h: number, colour: 
 export interface SpriteSheet {
   readonly trees: readonly Sprite[];
   readonly stones: readonly Sprite[];
+  readonly fields: readonly Sprite[];
   readonly decorations: readonly Sprite[];
   readonly buildings: ReadonlyMap<BuildingType, Sprite>;
   readonly sites: ReadonlyMap<BuildingSize, Sprite>;
@@ -443,6 +649,12 @@ export function buildSprites(
 
   const stones = [0, 1, 2].map((level) =>
     createSprite({ width: 22, height: 18 }, (ctx, w, h) => drawStone(ctx, w, h, (level + 1) / 3)),
+  );
+
+  const fields = [0, 1, 2, 3].map((stage) =>
+    createSprite({ width: 24, height: 20 }, (ctx, w, h) =>
+      drawField(ctx, w, h, stage / FIELD_MAX_GROWTH),
+    ),
   );
 
   const decorations = [0, 1].map((variant) =>
@@ -490,6 +702,7 @@ export function buildSprites(
   return {
     trees,
     stones,
+    fields,
     decorations,
     buildings,
     sites,

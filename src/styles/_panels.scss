@@ -92,6 +92,27 @@
   text-align: center;
 }
 
+.buildmenu__section {
+  // Sticks to the top while its own run of cards scrolls past, so it stays
+  // clear which trade you are looking at on a long list.
+  position: sticky;
+  top: -0.85rem;
+  z-index: 1;
+  margin: 0.75rem 0 0.4rem;
+  padding: 0.2rem 0;
+  background: inherit;
+  font-family: $font-body;
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  opacity: 0.75;
+
+  &:first-of-type {
+    margin-top: 0;
+  }
+}
+
 .buildmenu__grid {
   display: grid;
   // Cards stay finger-sized: two per row on a phone, more on a wider screen.

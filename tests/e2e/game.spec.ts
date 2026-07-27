@@ -132,12 +132,17 @@ test('tapping the headquarters describes it', async ({ page }) => {
 test('the game can be paused and resumed', async ({ page }) => {
   await startNewGame(page);
 
-  const speed = page.getByRole('button', { name: '1×' });
-  await speed.click();
-  await expect(page.getByRole('button', { name: '3×' })).toBeVisible();
+  await page.getByRole('button', { name: '1×' }).click();
+  await expect(page.getByRole('button', { name: '2×' })).toBeVisible();
 
-  await page.getByRole('button', { name: '3×' }).click();
+  await page.getByRole('button', { name: '2×' }).click();
+  await expect(page.getByRole('button', { name: '4×' })).toBeVisible();
+
+  await page.getByRole('button', { name: '4×' }).click();
   await expect(page.getByRole('button', { name: 'Paused' })).toBeVisible();
+
+  await page.getByRole('button', { name: 'Paused' }).click();
+  await expect(page.getByRole('button', { name: '1×' })).toBeVisible();
 });
 
 test('a game can be saved and then continued from the title screen', async ({ page }) => {

@@ -10,13 +10,24 @@ import {
   evaluateBuildSpace,
   type BuildingSize,
 } from '../../sim/world/buildspace';
-import { MapObject } from '../../sim/world/terrain';
+import { MapObject, Resource } from '../../sim/world/terrain';
 import { PALETTE, PLAYER_COLOURS } from '../art/palette';
 import { buildSprites, type Sprite, type SpriteSheet } from '../art/sprites';
 import { Camera } from '../camera';
 import { depthOf, pointX, pointY } from '../projection';
 import type { Renderer, ViewState } from '../renderer';
 import { TerrainChunks } from './terrain-chunks';
+
+/**
+ * How each kind of deposit is marked once a geologist has found it. Water and
+ * fish are left out: a well works anywhere and shoals are plain to see.
+ */
+const DEPOSIT_COLOURS: Readonly<Partial<Record<Resource, string>>> = {
+  [Resource.Coal]: '#38332e',
+  [Resource.Iron]: '#7d5c4a',
+  [Resource.Gold]: '#e0b53a',
+  [Resource.Granite]: '#9a9187',
+};
 
 /** Zoom is snapped to these steps before terrain is baked, so panning at a
  *  slightly wobbling pinch zoom doesn't rebake every chunk every frame. */
@@ -120,6 +131,7 @@ export class CanvasRenderer implements Renderer {
     ctx.restore();
 
     this.drawBorders(bounds);
+    this.drawDeposits(bounds);
     this.drawRoads(bounds);
     if (view.buildSpaceOverlay !== null) this.drawBuildSpaces(bounds, view);
     if (view.roadPreview) this.drawRoadPreview(view.roadPreview);
@@ -170,6 +182,48 @@ export class CanvasRenderer implements Renderer {
         ctx.arc(this.screenX(point), this.screenY(point), 2.4 * this.camera.zoom, 0, Math.PI * 2);
         ctx.fillStyle = colour;
         ctx.fill();
+      }
+    }
+  }
+
+  /**
+   * What the geologists have turned up.
+   *
+   * Only surveyed ground is marked, and only where something was actually
+   * found — the map stays honest about what the player has been told, which is
+   * the whole reason for sending a geologist in the first place.
+   */
+  private drawDeposits(bounds: ReturnType<Camera['visibleBounds']>): void {
+    const { ctx, camera } = this;
+    const world = this.simulation.world;
+    const { grid } = world;
+
+    for (let row = bounds.minRow; row <= bounds.maxRow; row += 1) {
+      for (let col = bounds.minCol; col <= bounds.maxCol; col += 1) {
+        const point = grid.index(col, row);
+        if (!world.resourceKnown[point]) continue;
+        if ((world.resourceAmount[point] ?? 0) <= 0) continue;
+
+        const colour = DEPOSIT_COLOURS[world.resource[point] as Resource];
+        if (!colour) continue;
+
+        const x = this.screenX(point);
+        const y = this.screenY(point);
+        const size = 2.6 * camera.zoom;
+
+        // A small diamond, which reads as a survey mark rather than as
+        // something standing on the ground.
+        ctx.beginPath();
+        ctx.moveTo(x, y - size);
+        ctx.lineTo(x + size, y);
+        ctx.lineTo(x, y + size);
+        ctx.lineTo(x - size, y);
+        ctx.closePath();
+        ctx.fillStyle = colour;
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(51, 38, 26, 0.55)';
+        ctx.lineWidth = Math.max(0.5, 0.9 * camera.zoom);
+        ctx.stroke();
       }
     }
   }
@@ -315,6 +369,8 @@ export class CanvasRenderer implements Renderer {
         } else if (object === MapObject.Stone) {
           const level = data >= 5 ? 2 : data >= 3 ? 1 : 0;
           sprite = this.sprites.stones[level];
+        } else if (object === MapObject.Field) {
+          sprite = this.sprites.fields[Math.min(this.sprites.fields.length - 1, data)];
         } else if (object === MapObject.Decoration) {
           sprite = this.sprites.decorations[data % this.sprites.decorations.length];
         }

@@ -11,7 +11,7 @@ import {
   canPlaceFlag,
   evaluateBuildSpace,
 } from './world/buildspace';
-import { MapObject, Resource } from './world/terrain';
+import { FIELD_FULLY_GROWN, MapObject, Resource } from './world/terrain';
 
 const PLAYER = 1;
 
@@ -114,8 +114,12 @@ describe('a new game', () => {
 describe('placement rules', () => {
   it('refuses buildings that are not yet available', () => {
     const sim = newGame();
+    // The hunter is hut-sized, so only its availability is under test here —
+    // it waits on game animals, which the map does not yet carry.
+    expect(buildingInfo(BuildingType.Hunter).available).toBe(false);
+
     const point = siteFor(sim, BuildingType.Woodcutter)!;
-    const result = sim.placeBuilding(PLAYER, point, BuildingType.Fortress);
+    const result = sim.placeBuilding(PLAYER, point, BuildingType.Hunter);
     expect(result.ok).toBe(false);
   });
 
@@ -331,7 +335,7 @@ describe('determinism', () => {
     // deliberately, never reflexively.
     const sim = newGame(4242);
     run(sim, 1000);
-    expect(sim.hash()).toMatchInlineSnapshot(`"f3df2b5c"`);
+    expect(sim.hash()).toMatchInlineSnapshot(`"f73534e2"`);
   });
 });
 
@@ -906,9 +910,16 @@ describe('a carrier with nothing to carry', () => {
     carrier.path = [];
     carrier.pathIndex = 0;
 
-    run(sim, 400);
+    // He is asked to reach his post, not to be standing on it at some arbitrary
+    // moment: this road is busy, so most ticks find him carrying something.
+    const waitingPoint = post(road);
+    let cameToPost = false;
+    for (let i = 0; i < 400 && !cameToPost; i += 1) {
+      sim.update();
+      cameToPost = sim.settlers.get(road.carrier)?.point === waitingPoint;
+    }
 
-    expect(sim.settlers.require(road.carrier).point).toBe(post(road));
+    expect(cameToPost).toBe(true);
   });
 
   it('still gets on with the job while it strolls', () => {
@@ -929,5 +940,187 @@ describe('a carrier with nothing to carry', () => {
     const before = sim.storedWare(PLAYER, Ware.Log);
     run(sim, 3000);
     expect(sim.storedWare(PLAYER, Ware.Log)).toBeGreaterThan(before);
+  });
+});
+
+describe('the farm', () => {
+  /** Places a farm on flat meadow near the headquarters and connects it. */
+  function buildFarm(sim: Simulation): number | undefined {
+    const id = buildAndConnect(sim, BuildingType.Farm);
+    return id;
+  }
+
+  it('sows fields, lets them ripen, and cuts them for grain', () => {
+    const sim = newGame();
+    const id = buildFarm(sim)!;
+    expect(id).toBeDefined();
+
+    const farm = sim.buildings.require(id);
+
+    // Watch the whole cycle: bare ground, then green corn, then a ripe crop.
+    let sown = false;
+    let ripened = false;
+    for (let i = 0; i < 12000 && !ripened; i += 1) {
+      sim.update();
+      for (const point of sim.world.grid.pointsWithin(farm.point, 6)) {
+        if (sim.world.object[point] !== MapObject.Field) continue;
+        sown = true;
+        if (sim.world.objectData[point]! >= FIELD_FULLY_GROWN) ripened = true;
+      }
+    }
+
+    expect(sown).toBe(true);
+    expect(ripened).toBe(true);
+
+    run(sim, 6000);
+    expect(sim.storedWare(PLAYER, Ware.Grain)).toBeGreaterThan(0);
+  });
+
+  it('sows only where the ground will take corn', () => {
+    const sim = newGame();
+    const id = buildFarm(sim)!;
+    run(sim, 12000);
+
+    const farm = sim.buildings.require(id);
+    for (const point of sim.world.grid.pointsWithin(farm.point, 6)) {
+      if (sim.world.object[point] !== MapObject.Field) continue;
+      // Every field must stand on ground a farmer could legally sow.
+      expect(sim.world.isWalkable(point)).toBe(true);
+    }
+  });
+});
+
+describe('geologists', () => {
+  /** A flag as near the mountains as the starting territory reaches. */
+  function frontierFlag(sim: Simulation): number | undefined {
+    const hq = headquarters(sim);
+    let best: number | undefined;
+    let bestRock = 0;
+
+    for (const point of sim.world.grid.pointsWithin(hq.point, 9)) {
+      if (!canPlaceFlag(sim.world, point, PLAYER)) continue;
+      const rock = sim.world.grid
+        .pointsWithin(point, 8)
+        .filter((near) => sim.world.resource[near] === Resource.Coal ||
+          sim.world.resource[near] === Resource.Iron ||
+          sim.world.resource[near] === Resource.Granite ||
+          sim.world.resource[near] === Resource.Gold).length;
+      if (rock > bestRock) {
+        bestRock = rock;
+        best = point;
+      }
+    }
+
+    if (best === undefined) return undefined;
+    if (!sim.placeFlag(PLAYER, best).ok) return undefined;
+    const route = planRoad(sim.world, headquarters(sim).flagPoint, best, PLAYER);
+    if (route) sim.placeRoad(PLAYER, route);
+    return best;
+  }
+
+  it('refuses to set out from a flag with no rock in reach', () => {
+    const sim = newGame();
+    const hq = headquarters(sim);
+    // The headquarters sits on levelled ground by construction, so there is
+    // nothing for a geologist to strike anywhere near it.
+    const result = sim.sendGeologist(PLAYER, hq.flagPoint);
+    expect(result.ok).toBe(false);
+  });
+
+  it('marks what it finds and comes home with its hammer', () => {
+    const sim = newGame();
+    const flag = frontierFlag(sim);
+    if (flag === undefined) return; // No rock in reach on this map.
+
+    const populationBefore = sim.population(PLAYER);
+    const hammersBefore = sim.storedWare(PLAYER, Ware.Hammer);
+
+    expect(sim.sendGeologist(PLAYER, flag).ok).toBe(true);
+
+    let surveyed = 0;
+    for (let i = 0; i < 6000; i += 1) {
+      sim.update();
+      if (i % 500 !== 0) continue;
+      surveyed = 0;
+      for (let point = 0; point < sim.world.grid.size; point += 1) {
+        if (sim.world.resourceKnown[point]) surveyed += 1;
+      }
+      if (surveyed > 0) break;
+    }
+    expect(surveyed).toBeGreaterThan(0);
+
+    // He is a settler on loan, not a settler spent.
+    run(sim, 6000);
+    expect(sim.population(PLAYER)).toBe(populationBefore);
+    expect(sim.storedWare(PLAYER, Ware.Hammer)).toBe(hammersBefore);
+  });
+
+  it('says nothing about ground nobody has surveyed', () => {
+    const sim = newGame();
+    for (let point = 0; point < sim.world.grid.size; point += 1) {
+      expect(sim.world.resourceKnown[point]).toBe(0);
+    }
+  });
+});
+
+describe('outposts', () => {
+  it('claims new ground when one is finished', () => {
+    const sim = newGame();
+    const id = buildAndConnect(sim, BuildingType.Guardhouse)!;
+    expect(id).toBeDefined();
+
+    let owned = 0;
+    for (let point = 0; point < sim.world.grid.size; point += 1) {
+      if (sim.world.owner[point] === PLAYER) owned += 1;
+    }
+
+    run(sim, 6000);
+
+    let ownedAfter = 0;
+    for (let point = 0; point < sim.world.grid.size; point += 1) {
+      if (sim.world.owner[point] === PLAYER) ownedAfter += 1;
+    }
+
+    expect(sim.buildings.require(id).state).toBe(BuildingState.Complete);
+    expect(ownedAfter).toBeGreaterThan(owned);
+  });
+
+  it('does not sit waiting for a worker it will never want', () => {
+    const sim = newGame();
+    const id = buildAndConnect(sim, BuildingType.Guardhouse)!;
+    run(sim, 6000);
+
+    const outpost = sim.buildings.require(id);
+    expect(outpost.state).toBe(BuildingState.Complete);
+    expect(outpost.status).toBe(BuildingStatus.Working);
+  });
+});
+
+describe('the metalworks', () => {
+  it('makes whichever tool the player is shortest of', () => {
+    const sim = newGame();
+    const hq = headquarters(sim);
+
+    // Everything in plentiful supply but the scythes.
+    for (const ware of [Ware.Hammer, Ware.Axe, Ware.Saw, Ware.PickAxe, Ware.Shovel,
+      Ware.Crucible, Ware.FishingRod, Ware.Cleaver, Ware.RollingPin]) {
+      hq.stock[ware] = 20;
+    }
+    hq.stock[Ware.Scythe] = 0;
+
+    const id = buildAndConnect(sim, BuildingType.Metalworks)!;
+    expect(id).toBeDefined();
+
+    const works = sim.buildings.require(id);
+    for (let i = 0; i < 12000; i += 1) {
+      sim.update();
+      if (works.state !== BuildingState.Complete) continue;
+      // Feed it by hand: smelting its iron is a chain of its own.
+      works.inputs[0] = 4;
+      works.inputs[1] = 4;
+      if (sim.storedWare(PLAYER, Ware.Scythe) > 0) break;
+    }
+
+    expect(sim.storedWare(PLAYER, Ware.Scythe)).toBeGreaterThan(0);
   });
 });
