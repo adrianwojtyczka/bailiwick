@@ -1,15 +1,22 @@
 import type { BuildingInfo, BuildingType } from '../sim/data/buildings';
 import { AVAILABLE_BUILDINGS, buildingInfo, CATEGORY_ORDER } from '../sim/data/buildings';
-import { Ware, wareInfo } from '../sim/data/wares';
+import type { Ware } from '../sim/data/wares';
+import { wareInfo } from '../sim/data/wares';
 import type { Building } from '../sim/entities/types';
 import { BuildingState, BuildingStatus } from '../sim/entities/types';
 import type { Simulation } from '../sim/simulation';
-import { BuildSpace, canHostSize, evaluateBuildSpace } from '../sim/world/buildspace';
-import { Resource, RESOURCE_NAMES } from '../sim/world/terrain';
+import { TICKS_PER_SECOND } from '../sim/simulation';
+import { OUT_OF_BOUNDS } from '../sim/core/grid';
+import { BuildSpace, evaluateBuildSpace } from '../sim/world/buildspace';
+import {
+  FIELD_FULLY_GROWN,
+  MapObject,
+  Resource,
+  RESOURCE_NAMES,
+  TREE_FULLY_GROWN,
+  terrainOf,
+} from '../sim/world/terrain';
 import { button, clear, el } from './dom';
-
-/** Wares shown permanently in the top bar. */
-const TRACKED_WARES: readonly Ware[] = [Ware.Board, Ware.Stone, Ware.Log, Ware.Fish];
 
 const STATUS_TEXT: Readonly<Record<BuildingStatus, string>> = {
   [BuildingStatus.Working]: 'Working',
@@ -30,6 +37,7 @@ export interface HudCallbacks {
   startRoad(flagPoint: number): void;
   placeFlag(point: number): void;
   sendGeologist(flagPoint: number): void;
+  centreOn(point: number): void;
   setSpeed(speed: number): void;
   save(): void;
   exportSave(): void;
@@ -58,8 +66,9 @@ export class Hud {
   private readonly playerId: number;
   private readonly callbacks: HudCallbacks;
 
-  private readonly stats: HTMLElement;
+  private readonly unread: HTMLElement;
   private readonly ticker: HTMLElement;
+  private readonly messages: HTMLElement;
   private readonly panel: HTMLElement;
   private readonly buildMenu: HTMLElement;
   private readonly actions: HTMLElement;
@@ -68,7 +77,9 @@ export class Hud {
 
   private buildMenuOpen = false;
   private menuOpen = false;
+  private messagesOpen = false;
   private lastEventCount = 0;
+  private readCount = 0;
   private state: HudState = {
     selectedPoint: -1,
     pendingBuilding: null,
@@ -88,8 +99,10 @@ export class Hud {
     this.playerId = playerId;
     this.callbacks = callbacks;
 
-    this.stats = el('div', { class: 'hud__stats' });
+    this.unread = el('button', { class: 'hud__unread', type: 'button', hidden: true });
+    this.unread.addEventListener('click', () => this.toggleMessages());
     this.ticker = el('div', { class: 'hud__ticker', 'aria-live': 'polite' });
+    this.messages = el('div', { class: 'messages', hidden: true });
     this.panel = el('aside', { class: 'panel', hidden: true });
     this.buildMenu = el('div', { class: 'buildmenu', hidden: true });
     this.actions = el('div', { class: 'hud__actions' });
@@ -106,12 +119,13 @@ export class Hud {
       el(
         'header',
         { class: 'hud__bar' },
-        this.stats,
+        this.unread,
         button('Menu', 'hud__menubutton', () => this.toggleMenu()),
       ),
       this.ticker,
       this.panel,
       this.buildMenu,
+      this.messages,
       this.menu,
       this.actions,
       this.fileInput,
@@ -134,12 +148,13 @@ export class Hud {
 
     this.state = state;
 
-    this.renderStats();
     if (selectionChanged) this.renderPanel();
     if (speedChanged || modeChanged) this.renderActions();
     if (noticeChanged || this.simulation.events.length !== this.lastEventCount) {
       this.lastEventCount = this.simulation.events.length;
       this.renderTicker();
+      this.renderUnread();
+      if (this.messagesOpen) this.renderMessages();
     }
   }
 
@@ -149,35 +164,58 @@ export class Hud {
 
   // -------------------------------------------------------------- sections
 
-  private renderStats(): void {
-    clear(this.stats);
+  private renderTicker(): void {
+    const latest = this.simulation.events[this.simulation.events.length - 1];
+    this.ticker.textContent = this.state.notice ?? latest?.text ?? '';
+    this.ticker.classList.toggle('hud__ticker--warning', this.state.notice !== null);
+  }
 
-    for (const ware of TRACKED_WARES) {
-      const info = wareInfo(ware);
-      this.stats.append(
-        el(
-          'span',
-          { class: 'chip', title: info.name },
-          el('span', { class: 'chip__swatch', style: `background:${info.colour}` }),
-          el('span', { class: 'chip__value' }, String(this.simulation.storedWare(this.playerId, ware))),
-        ),
-      );
-    }
-
-    this.stats.append(
-      el(
-        'span',
-        { class: 'chip', title: 'Settlers' },
-        el('span', { class: 'chip__label' }, 'Pop'),
-        el('span', { class: 'chip__value' }, String(this.simulation.population(this.playerId))),
-      ),
+  /** How many messages have arrived since the log was last opened. */
+  private renderUnread(): void {
+    const count = Math.max(0, this.simulation.events.length - this.readCount);
+    this.unread.hidden = count === 0;
+    this.unread.textContent = count > 9 ? '9+' : String(count);
+    this.unread.setAttribute(
+      'aria-label',
+      `${count} unread message${count === 1 ? '' : 's'}`,
     );
   }
 
-  private renderTicker(): void {
-    const message = this.state.notice ?? this.simulation.events[this.simulation.events.length - 1];
-    this.ticker.textContent = message ?? '';
-    this.ticker.classList.toggle('hud__ticker--warning', this.state.notice !== null);
+  private renderMessages(): void {
+    clear(this.messages);
+    this.messages.append(el('h2', { class: 'messages__title' }, 'Messages'));
+
+    const events = this.simulation.events;
+    if (events.length === 0) {
+      this.messages.append(el('p', { class: 'panel__note' }, 'Nothing has happened yet.'));
+      return;
+    }
+
+    const list = el('div', { class: 'messages__list' });
+
+    // Newest first: the thing that just happened is the thing being looked for.
+    for (let i = events.length - 1; i >= 0; i -= 1) {
+      const message = events[i]!;
+      const entry = el(
+        'button',
+        { class: `messages__item messages__item--${message.category}`, type: 'button' },
+        el('span', { class: 'messages__when' }, formatTick(message.tick)),
+        el('span', { class: 'messages__text' }, message.text),
+      );
+
+      if (message.point >= 0) {
+        entry.addEventListener('click', () => {
+          this.callbacks.centreOn(message.point);
+          this.closeMessages();
+        });
+      } else {
+        entry.disabled = true;
+      }
+
+      list.append(entry);
+    }
+
+    this.messages.append(list);
   }
 
   private renderActions(): void {
@@ -411,23 +449,64 @@ export class Hud {
     return el('p', { class: 'panel__note' }, `Surveyed: ${RESOURCE_NAMES[resource]} below.`);
   }
 
+  /** The kind of ground under a point, named from the triangles around it. */
+  private terrainName(point: number): string {
+    const world = this.simulation.world;
+    const counts = new Map<string, number>();
+
+    world.trianglesAroundPoint(point, TRIANGLES);
+    for (let i = 0; i < 6; i += 1) {
+      const triangle = TRIANGLES[i]!;
+      if (triangle === OUT_OF_BOUNDS) continue;
+      const name = terrainOf(world.terrainOfTriangle(triangle)).name;
+      counts.set(name, (counts.get(name) ?? 0) + 1);
+    }
+
+    // Six triangles meet here and they need not agree; the commonest wins, so a
+    // point on a shoreline reads as whichever side it mostly sits on.
+    let best = 'Water';
+    let most = 0;
+    for (const [name, count] of counts) {
+      if (count > most) {
+        most = count;
+        best = name;
+      }
+    }
+    return best;
+  }
+
+  /** What is standing on a point, if anything. */
+  private standingOn(point: number): string | null {
+    const world = this.simulation.world;
+    const data = world.objectData[point] ?? 0;
+
+    switch (world.object[point]) {
+      case MapObject.Tree:
+        return data >= TREE_FULLY_GROWN ? 'A grown tree.' : 'A sapling, still growing.';
+      case MapObject.Stone:
+        return `A granite outcrop, ${data} block${data === 1 ? '' : 's'} left.`;
+      case MapObject.Field:
+        return data >= FIELD_FULLY_GROWN ? 'Corn, ready to cut.' : 'A sown field, still green.';
+      case MapObject.Decoration:
+        return 'Scrub.';
+      default:
+        return null;
+    }
+  }
+
   private showGroundPanel(point: number): void {
     const world = this.simulation.world;
     const onRoad = world.roadCount(point) > 0;
     const space = evaluateBuildSpace(world, point, this.playerId);
-    const deposit = this.depositNote(point);
-
-    if (space === BuildSpace.None && !onRoad) {
-      const children: HTMLElement[] = [el('h2', { class: 'panel__title' }, 'Open ground')];
-      if (deposit) children.push(deposit);
-      else children.push(el('p', { class: 'panel__note' }, 'Nothing can be built here.'));
-      this.showPanel(children);
-      return;
-    }
 
     const children: HTMLElement[] = [
-      el('h2', { class: 'panel__title' }, onRoad ? 'Road' : 'Open ground'),
+      el('h2', { class: 'panel__title' }, onRoad ? 'Road' : this.terrainName(point)),
     ];
+
+    const standing = this.standingOn(point);
+    if (standing) children.push(el('p', { class: 'panel__status' }, standing));
+
+    const deposit = this.depositNote(point);
     if (deposit) children.push(deposit);
 
     if (space !== BuildSpace.None) {
@@ -444,15 +523,6 @@ export class Hud {
         button('Remove this road', 'panel__action panel__action--danger', () =>
           this.callbacks.demolishRoad(point),
         ),
-      );
-      this.showPanel(children);
-      return;
-    }
-
-    const fits = AVAILABLE_BUILDINGS.filter((info) => canHostSize(space, info.size));
-    if (fits.length > 0) {
-      children.push(
-        el('p', { class: 'panel__note' }, `Room for: ${fits.map((info) => info.name).join(', ')}`),
       );
     }
 
@@ -472,14 +542,46 @@ export class Hud {
     this.menuOpen = !this.menuOpen;
     this.menu.hidden = !this.menuOpen;
     if (this.menuOpen) {
+      this.closeMessages();
       this.buildMenuOpen = false;
       this.buildMenu.hidden = true;
       this.renderActions();
     }
   }
 
+  private toggleMessages(): void {
+    this.messagesOpen = !this.messagesOpen;
+    this.messages.hidden = !this.messagesOpen;
+
+    if (!this.messagesOpen) return;
+
+    this.closeMenu();
+    this.buildMenuOpen = false;
+    this.buildMenu.hidden = true;
+    this.renderActions();
+    this.renderMessages();
+
+    // Opening the log is what marks it read.
+    this.readCount = this.simulation.events.length;
+    this.renderUnread();
+  }
+
+  private closeMessages(): void {
+    this.messagesOpen = false;
+    this.messages.hidden = true;
+  }
+
   private closeMenu(): void {
     this.menuOpen = false;
     this.menu.hidden = true;
   }
+}
+
+const TRIANGLES = new Int32Array(6);
+
+/** Game time as minutes and seconds, which is how long a game actually feels. */
+function formatTick(tick: number): string {
+  const seconds = Math.floor(tick / TICKS_PER_SECOND);
+  const minutes = Math.floor(seconds / 60);
+  return `${minutes}:${String(seconds % 60).padStart(2, '0')}`;
 }

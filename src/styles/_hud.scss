@@ -35,44 +35,37 @@
   right: calc(env(safe-area-inset-right, 0px) + 0.5rem);
   display: flex;
   align-items: center;
+  justify-content: flex-end;
   gap: 0.5rem;
   padding: 0.35rem 0.5rem;
+  // Only the unread badge and the Menu button live here now, so the bar hugs
+  // the top right and leaves the whole map clear.
+  left: auto;
+  width: max-content;
+  margin-left: auto;
 }
 
-.hud__stats {
-  display: flex;
-  flex: 1;
-  flex-wrap: wrap;
-  gap: 0.4rem;
-  min-width: 0;
-}
+/**
+ * The unread count, sitting immediately left of Menu. Hidden entirely when
+ * there is nothing new, so a quiet game shows no chrome at all.
+ */
+.hud__unread {
+  @include tappable;
 
-.chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.3rem;
-  padding: 0.15rem 0.45rem;
+  flex: 0 0 auto;
+  min-width: 38px;
+  min-height: 38px;
+  padding: 0.35rem 0.6rem;
   border: 1px solid $rule;
   border-radius: 999px;
-  background: rgba(232, 216, 180, 0.7);
-  font-size: 0.82rem;
-  white-space: nowrap;
-}
-
-.chip__swatch {
-  width: 0.7rem;
-  height: 0.7rem;
-  border: 1px solid rgba(51, 38, 26, 0.5);
-  border-radius: 2px;
-}
-
-.chip__label {
-  color: $ink-soft;
-}
-
-.chip__value {
+  background: $ochre;
+  color: $parchment;
   font-variant-numeric: tabular-nums;
-  font-weight: 600;
+  font-weight: 700;
+
+  &[hidden] {
+    display: none;
+  }
 }
 
 .hud__menubutton {

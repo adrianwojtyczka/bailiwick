@@ -137,7 +137,7 @@ describe('saves from an older version', () => {
     parsed.version = 1;
     delete parsed.growingFields;
     const settlers = parsed.settlers as { items: Record<string, unknown>[] };
-    for (const settler of settlers.items) delete settler.surveysLeft;
+    for (const settler of settlers.items) delete settler.surveyFrom;
 
     const out = new Blob([JSON.stringify(parsed)])
       .stream()
@@ -159,7 +159,7 @@ describe('saves from an older version', () => {
     );
     // And the fields it predates default to nothing rather than to undefined.
     for (const settler of restored.settlers.all()) {
-      expect(settler.surveysLeft).toBe(0);
+      expect(settler.surveyFrom).toBe(0);
     }
   });
 

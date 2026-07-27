@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { BuildingType, buildingInfo } from './data/buildings';
+import { Profession } from './data/professions';
 import { Ware } from './data/wares';
 import { BuildingState, BuildingStatus, FLAG_CAPACITY, SettlerState } from './entities/types';
 import { Simulation } from './simulation';
@@ -188,7 +189,7 @@ describe('construction', () => {
     const building = sim.buildings.require(id);
     expect(building.state).toBe(BuildingState.Complete);
     expect(sim.storedWare(PLAYER, Ware.Board)).toBeLessThan(boardsBefore);
-    expect(sim.events.some((event) => event.includes('completed'))).toBe(true);
+    expect(sim.events.some((event) => event.text.includes('completed'))).toBe(true);
   });
 
   it('staffs a finished building with a worker', () => {
@@ -1091,19 +1092,35 @@ describe('geologists', () => {
     expect(wells.length).toBeGreaterThan(0);
   });
 
-  it('marks only the spot it actually struck', () => {
+  it('works the whole patch around its flag, and nothing beyond it', () => {
     const sim = newGame();
     const hq = headquarters(sim);
     expect(sim.sendGeologist(PLAYER, hq.flagPoint).ok).toBe(true);
 
-    run(sim, 4000);
+    run(sim, 40000);
 
     let known = 0;
     for (let point = 0; point < sim.world.grid.size; point += 1) {
-      if (sim.world.resourceKnown[point]) known += 1;
+      if (!sim.world.resourceKnown[point]) continue;
+      known += 1;
+      // Each mark is a hole he dug, and every hole is inside his own patch.
+      expect(sim.world.grid.distance(hq.flagPoint, point)).toBeLessThanOrEqual(4);
     }
-    // Three surveys, three holes — not three patches of hillside.
-    expect(known).toBeLessThanOrEqual(3);
+
+    // A whole patch, not the three holes he used to manage.
+    expect(known).toBeGreaterThan(3);
+  });
+
+  it('comes home once the patch is done', () => {
+    const sim = newGame();
+    const hq = headquarters(sim);
+    const before = sim.population(PLAYER);
+    expect(sim.sendGeologist(PLAYER, hq.flagPoint).ok).toBe(true);
+
+    run(sim, 40000);
+
+    expect(sim.settlers.all().some((s) => s.profession === Profession.Geologist)).toBe(false);
+    expect(sim.population(PLAYER)).toBeGreaterThanOrEqual(before);
   });
 
   it('marks what it finds and comes home with its hammer', () => {
@@ -1283,10 +1300,18 @@ describe('a settler sent somewhere new mid-stride', () => {
     // tick we interrupt it. Being between two points is the state the old code
     // mishandled.
     let strides = 0;
-    while (strides < 200 && !(carrier.stepProgress === 1 && carrier.toPoint !== carrier.point)) {
+    while (
+      strides < 400 &&
+      !(
+        carrier.state === SettlerState.CarrierWaiting &&
+        carrier.stepProgress === 1 &&
+        carrier.toPoint !== carrier.point
+      )
+    ) {
       sim.update();
       strides += 1;
     }
+    expect(carrier.state).toBe(SettlerState.CarrierWaiting);
     expect(carrier.stepProgress).toBe(1);
     expect(carrier.stepLength).toBeGreaterThan(2);
 
@@ -1398,5 +1423,208 @@ describe('ore in the mountains', () => {
     }
 
     expect(checked).toBeGreaterThan(0);
+  });
+});
+
+describe('wares that cannot be routed', () => {
+  it('is taken in when it is left at a store’s own door', () => {
+    const sim = newGame();
+    const hq = headquarters(sim);
+    const flag = sim.flags.require(sim.world.flag[hq.flagPoint]!);
+
+    const before = sim.storedWare(PLAYER, Ware.Log);
+    // A parcel that arrived any way other than a carrier handing it over —
+    // retargeting to the nearest store puts one here for nothing.
+    flag.wares.push({ ware: Ware.Log, destination: hq.id });
+
+    run(sim, 20);
+
+    expect(flag.wares.some((parcel) => parcel.destination === hq.id)).toBe(false);
+    expect(sim.storedWare(PLAYER, Ware.Log)).toBe(before + 1);
+  });
+
+  it('leaves room at a store door for deliveries coming the other way', () => {
+    const sim = newGame();
+    const hq = headquarters(sim);
+    buildAndConnect(sim, BuildingType.Sawmill);
+    run(sim, 8000);
+
+    const flag = sim.flags.require(sim.world.flag[hq.flagPoint]!);
+    // A store that filled its own flag with goods going out walled itself in.
+    expect(flag.wares.length).toBeLessThan(FLAG_CAPACITY);
+  });
+
+  it('swaps at a full flag rather than waiting for ever', () => {
+    const sim = newGame();
+    const id = buildAndConnect(sim, BuildingType.Woodcutter, MapObject.Tree)!;
+    run(sim, 4000);
+
+    const hut = sim.buildings.require(id);
+    const flag = sim.flags.require(sim.world.flag[hut.flagPoint]!);
+
+    // Jam the hut's flag full of wares that must travel towards the store, and
+    // hand its carrier something to bring the other way.
+    flag.wares.length = 0;
+    for (let i = 0; i < FLAG_CAPACITY; i += 1) {
+      flag.wares.push({ ware: Ware.Log, destination: headquarters(sim).id });
+    }
+
+    const before = sim.storedWare(PLAYER, Ware.Log);
+    run(sim, 8000);
+
+    // The queue moved: waiting for a free place would have deadlocked, since
+    // these logs can only leave in the hands of the carrier stood before them.
+    expect(sim.storedWare(PLAYER, Ware.Log)).toBeGreaterThan(before);
+  });
+});
+
+describe('a road torn up under a loaded carrier', () => {
+  it('sets the crate down instead of destroying it, and reorders nothing twice', () => {
+    const sim = newGame();
+    const id = buildAndConnect(sim, BuildingType.Sawmill)!;
+    expect(id).toBeDefined();
+
+    // Catch a carrier actually holding something.
+    let carrier: ReturnType<typeof sim.settlers.get>;
+    for (let i = 0; i < 4000 && !carrier; i += 1) {
+      sim.update();
+      carrier = sim.settlers.all().find((s) => s.carrying !== null && s.road !== 0);
+    }
+    expect(carrier).toBeDefined();
+
+    const held = carrier!.carrying!;
+    const site = sim.buildings.require(id);
+    const road = sim.roads.require(carrier!.road);
+
+    const wareCount = () => {
+      let total = sim.storedWare(PLAYER, held);
+      sim.flags.forEach((flag) => {
+        total += flag.wares.filter((parcel) => parcel.ware === held).length;
+      });
+      sim.settlers.forEach((settler) => {
+        if (settler.carrying === held) total += 1;
+      });
+      let index = 0;
+      for (const item of buildingInfo(site.type).cost) {
+        if (item.ware === held) total += site.delivered[index] ?? 0;
+        index += 1;
+      }
+      return total;
+    };
+
+    const before = wareCount();
+    expect(sim.demolishRoad(PLAYER, road.points[1]!).ok).toBe(true);
+    run(sim, 10);
+
+    // Nothing was annihilated by the road going away.
+    expect(wareCount()).toBe(before);
+  });
+
+  it('still finishes the building once the road is laid again', () => {
+    const sim = newGame();
+    const id = buildAndConnect(sim, BuildingType.Sawmill)!;
+
+    for (let i = 0; i < 4000; i += 1) {
+      sim.update();
+      if (sim.settlers.all().some((s) => s.carrying !== null && s.road !== 0)) break;
+    }
+
+    const road = sim.roads.all()[0]!;
+    sim.demolishRoad(PLAYER, road.points[1]!);
+    run(sim, 400);
+
+    const site = sim.buildings.require(id);
+    const route = planRoad(sim.world, headquarters(sim).flagPoint, site.flagPoint, PLAYER);
+    expect(route).toBeDefined();
+    expect(sim.placeRoad(PLAYER, route!).ok).toBe(true);
+
+    // A reservation left behind by the lost crate would keep the site looking
+    // satisfied for ever, and nothing more would be sent.
+    run(sim, 20000);
+    expect(site.state).toBe(BuildingState.Complete);
+  });
+});
+
+describe('carrying the work in and out', () => {
+  it('has the woodcutter walk his log to the flag himself', () => {
+    const sim = newGame();
+    const id = buildAndConnect(sim, BuildingType.Woodcutter, MapObject.Tree)!;
+
+    let sawHimCarrying = false;
+    for (let i = 0; i < 8000 && !sawHimCarrying; i += 1) {
+      sim.update();
+      const worker = sim.settlers.get(sim.buildings.require(id).worker);
+      sawHimCarrying =
+        worker?.state === SettlerState.DeliveringToFlag && worker.carrying === Ware.Log;
+    }
+
+    expect(sawHimCarrying).toBe(true);
+  });
+
+  it('sends a carrier inside the building with his delivery', () => {
+    const sim = newGame();
+    buildAndConnect(sim, BuildingType.Woodcutter, MapObject.Tree);
+    const id = buildAndConnect(sim, BuildingType.Sawmill)!;
+
+    let sawHimInside = false;
+    for (let i = 0; i < 20000 && !sawHimInside; i += 1) {
+      sim.update();
+      const mill = sim.buildings.require(id);
+      sawHimInside = sim.settlers
+        .all()
+        .some((s) => s.state === SettlerState.EnteringBuilding && s.point === mill.point);
+    }
+
+    expect(sawHimInside).toBe(true);
+  });
+});
+
+describe('messages', () => {
+  it('says once when a building has run out, not every tick', () => {
+    const sim = newGame();
+    const id = buildAndConnect(sim, BuildingType.Woodcutter, MapObject.Tree)!;
+    run(sim, 3000);
+
+    // Take every tree away, so there is nothing left to cut.
+    const hut = sim.buildings.require(id);
+    for (const point of sim.world.grid.pointsWithin(hut.point, 8)) {
+      if (sim.world.object[point] === MapObject.Tree) sim.world.object[point] = MapObject.None;
+    }
+
+    run(sim, 6000);
+
+    const exhausted = sim.events.filter((message) => message.category === 'exhausted');
+    expect(exhausted.length).toBeGreaterThan(0);
+    expect(exhausted.length).toBeLessThanOrEqual(2);
+    expect(exhausted[0]!.point).toBe(hut.point);
+  });
+
+  it('reports a seam once rather than once per hole', () => {
+    const sim = newGame();
+    const hq = headquarters(sim);
+    expect(sim.sendGeologist(PLAYER, hq.flagPoint).ok).toBe(true);
+
+    run(sim, 40000);
+
+    let marked = 0;
+    for (let point = 0; point < sim.world.grid.size; point += 1) {
+      if (sim.world.resourceKnown[point]) marked += 1;
+    }
+
+    const finds = sim.events.filter((message) => message.text.includes('finds'));
+    expect(marked).toBeGreaterThan(finds.length);
+  });
+
+  it('remembers where each message happened, so the log can go there', () => {
+    const sim = newGame();
+    buildAndConnect(sim, BuildingType.Woodcutter, MapObject.Tree);
+    run(sim, 4000);
+
+    const built = sim.events.filter((message) => message.category === 'built');
+    expect(built.length).toBeGreaterThan(0);
+    for (const message of built) {
+      expect(message.point).toBeGreaterThanOrEqual(0);
+      expect(message.tick).toBeGreaterThan(0);
+    }
   });
 });

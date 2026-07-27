@@ -75,10 +75,14 @@ test('the title screen offers a new game', async ({ page }) => {
 test('a new game starts with a stocked headquarters', async ({ page }) => {
   await startNewGame(page);
 
-  const stats = page.locator('.hud__stats');
-  await expect(stats).toContainText('24'); // boards
-  await expect(stats).toContainText('18'); // stone
-  await expect(stats).toContainText('Pop');
+  // Stock lives on the headquarters panel now that the top bar is gone.
+  const centre = await canvasCentre(page);
+  await page.mouse.click(centre.x, centre.y);
+
+  const panel = page.locator('.panel');
+  await expect(panel).toContainText('Board: 24');
+  await expect(panel).toContainText('Stone: 18');
+  await expect(panel).toContainText('Settlers waiting');
 });
 
 test('the build menu lists what can be built', async ({ page }) => {
@@ -161,7 +165,10 @@ test('a game can be saved and then continued from the title screen', async ({ pa
   await page.locator('.title__button--save').first().click();
 
   await expect(page.locator('canvas.map')).toBeVisible();
-  await expect(page.locator('.hud__stats')).toContainText('Pop');
+
+  const centre = await canvasCentre(page);
+  await page.mouse.click(centre.x, centre.y);
+  await expect(page.locator('.panel__title')).toContainText('Headquarters');
 });
 
 test('the map pans when dragged', async ({ page }) => {

@@ -65,11 +65,14 @@ const FIELD_GROWTH_INTERVAL = 600;
 /** How far from its shaft a mine can work the seam. */
 const SEAM_RADIUS = 2;
 
-/** How many outcrops one geologist strikes before he walks home. */
-const GEOLOGIST_SURVEYS = 3;
+/** How far from the flag he set out from a geologist works the ground. */
+const GEOLOGIST_RANGE = 4;
 
-/** How far from his flag, and from each stop, a geologist will wander. */
-const GEOLOGIST_RANGE = 6;
+/**
+ * How far a settler in open country will look for a flag to join the roads at
+ * on his way home. Wide enough to cover a geologist's patch and the walk to it.
+ */
+const NEAREST_FLAG_RANGE = 12;
 
 /**
  * Ticks spent hammering at one outcrop.
@@ -85,6 +88,22 @@ const GEOLOGIST_TRIES = 8;
 
 /** How often stranded wares are given a new destination. */
 const STRANDED_SWEEP_INTERVAL = 40;
+
+/** How many messages are kept before the oldest are dropped. */
+const MESSAGE_LIMIT = 64;
+
+/**
+ * How near a previous find of the same thing has to be for a fresh one to go
+ * unreported. A geologist works a patch of four, so this covers a seam without
+ * hiding a genuinely separate one on the next hill.
+ */
+const SURVEY_MESSAGE_SPREAD = 3;
+
+/**
+ * How much of its own flag a store will fill with goods going out, leaving the
+ * rest free for whatever is being brought back to it.
+ */
+const STORE_DISPATCH_LIMIT = Math.floor(FLAG_CAPACITY / 2);
 
 /**
  * How long a worker rests indoors between trips out.
@@ -123,6 +142,50 @@ const POPULATION_INTERVAL = 600;
 /** How many more people each finished building lets a province support. */
 const SETTLERS_PER_BUILDING = 3;
 
+/**
+ * What a message is about. The category decides how a message is shown and,
+ * more importantly, which earlier messages it counts as a repeat of.
+ */
+export const MessageCategory = {
+  Built: 'built',
+  Territory: 'territory',
+  Survey: 'survey',
+  Coal: 'coal',
+  Iron: 'iron',
+  Gold: 'gold',
+  Granite: 'granite',
+  Water: 'water',
+  Exhausted: 'exhausted',
+} as const;
+
+export type MessageCategory = (typeof MessageCategory)[keyof typeof MessageCategory];
+
+/** Something worth telling the player about, and where it happened. */
+export interface GameMessage {
+  readonly text: string;
+  readonly category: MessageCategory;
+  /** Where on the map it happened, or -1 when it has no place. */
+  readonly point: number;
+  readonly tick: number;
+}
+
+/** What a building has actually run out of, in its own terms. */
+const EXHAUSTED_REASON: Readonly<Record<string, string>> = {
+  harvest: 'nothing left to cut within reach',
+  plant: 'nowhere left to plant',
+  farm: 'no ground left to sow',
+  extract: 'the deposit is worked out',
+};
+
+/** A find of each resource gets its own category, so like is coalesced. */
+const FIND_CATEGORY: Readonly<Partial<Record<Resource, MessageCategory>>> = {
+  [Resource.Coal]: MessageCategory.Coal,
+  [Resource.Iron]: MessageCategory.Iron,
+  [Resource.Gold]: MessageCategory.Gold,
+  [Resource.Granite]: MessageCategory.Granite,
+  [Resource.Water]: MessageCategory.Water,
+};
+
 export interface PlayerConfig {
   readonly name: string;
   readonly colour: string;
@@ -151,10 +214,11 @@ type FieldWork = Extract<
 /**
  * Bumped whenever the shape of a saved game changes.
  *
- * Version 2 added ripening fields and the geologist's survey counter. Saves
- * from version 1 still load: `fromSnapshot` fills in what they predate.
+ * Version 2 added ripening fields and a geologist's survey counter; version 3
+ * replaced that counter with the flag whose ground he is working. Older saves
+ * still load: `fromSnapshot` fills in whatever they predate.
  */
-export const SAVE_VERSION = 2;
+export const SAVE_VERSION = 3;
 
 /** The parts of the map that play can change, and so must be saved. */
 export interface MapSnapshot {
@@ -190,7 +254,7 @@ export interface SimulationSnapshot {
   readonly growingTrees: readonly number[];
   /** Absent in version 1 saves, which predate farms. */
   readonly growingFields?: readonly number[];
-  readonly events: readonly string[];
+  readonly events: readonly GameMessage[];
 }
 
 export type CommandResult = { readonly ok: true } | { readonly ok: false; readonly reason: string };
@@ -218,7 +282,7 @@ export class Simulation {
   tick = 0;
 
   /** Recent notices for the message ticker, newest last. */
-  readonly events: string[] = [];
+  readonly events: GameMessage[] = [];
 
   private rng: Rng;
   /** Points holding a sapling that has not finished growing. */
@@ -396,7 +460,7 @@ export class Simulation {
     const flag = this.flags.require(flagId);
     if (flag.owner !== player) return fail('That flag is not yours.');
 
-    if (this.surveyTarget(point) === undefined) {
+    if (this.surveyTarget(point, point) === undefined) {
       return fail('There is nothing left to survey within reach of that flag.');
     }
 
@@ -412,11 +476,11 @@ export class Simulation {
     if (tool !== null) store.stock[tool] = store.stock[tool]! - 1;
 
     const settler = this.createSettler(player, Profession.Geologist, store.flagPoint);
-    settler.surveysLeft = GEOLOGIST_SURVEYS;
+    settler.surveyFrom = point;
     settler.state = SettlerState.WalkingToJob;
     this.setPath(settler, path);
 
-    this.note('A geologist sets out.');
+    this.note('A geologist sets out.', MessageCategory.Survey, point);
     return OK;
   }
 
@@ -649,7 +713,7 @@ export class Simulation {
       road: 0,
       taskPoint: 0,
       taskTimer: 0,
-      surveysLeft: 0,
+      surveyFrom: 0,
     }));
   }
 
@@ -800,9 +864,52 @@ export class Simulation {
     const settler = this.settlers.get(settlerId);
     if (!settler) return;
 
-    // Whatever was in hand falls where the settler stood.
-    settler.carrying = null;
+    this.putDownCarriedWare(settler);
     this.sendHome(settler);
+  }
+
+  /**
+   * Sets down whatever a settler is holding before he leaves the job.
+   *
+   * Tearing up a road under a loaded carrier used to annihilate the crate and,
+   * worse, leave its reservation standing at the far end: the destination went
+   * on counting a ware that no longer existed, so `outstandingDemand` stayed
+   * satisfied, nothing was ever reordered, and a building site waited for good.
+   *
+   * The crate is put on the nearest flag that will hold it. The reservation is
+   * released either way — the ware has stopped being on its way, whether it
+   * found a flag or was lost — so the destination can ask again.
+   */
+  private putDownCarriedWare(settler: Settler): void {
+    const ware = settler.carrying;
+    if (ware === null) {
+      settler.carryDestination = 0;
+      return;
+    }
+
+    const destination = settler.carryDestination;
+    settler.carrying = null;
+    settler.carryDestination = 0;
+
+    this.releaseIncoming(destination, ware);
+
+    // The flag he was headed for, then the ends of the road he worked: the
+    // nearest place the crate can wait for somebody to pick it up again.
+    const road = this.roads.get(settler.road);
+    const candidates = [settler.taskPoint, road?.fromFlag ?? 0, road?.toFlag ?? 0];
+
+    for (const flagId of candidates) {
+      if (!flagId) continue;
+      const flag = this.flags.get(flagId);
+      if (!flag || flag.wares.length >= FLAG_CAPACITY) continue;
+
+      const parcel: WareParcel = { ware, destination: 0 };
+      // Give it a home again if one can be found; the stranded sweep will keep
+      // trying if not.
+      this.retarget(flag, parcel);
+      flag.wares.push(parcel);
+      return;
+    }
   }
 
   /**
@@ -856,13 +963,13 @@ export class Simulation {
 
     if (storeFlag) {
       const doorstep = this.flagPointOf(from);
-      const startFlag = doorstep === undefined ? 0 : this.world.flag[doorstep];
-
-      if (startFlag) {
+      if (doorstep !== undefined) {
+        const startFlag = this.world.flag[doorstep]!;
         const alongRoads = roadPointPath(this.network, this.roads, startFlag, storeFlag);
         if (alongRoads) {
-          const toDoorstep = doorstep === from ? [] : [doorstep!];
-          return [...toDoorstep, ...alongRoads, store.point];
+          const toDoorstep =
+            doorstep === from ? [] : (walkablePath(this.world, from, doorstep) ?? undefined);
+          if (toDoorstep) return [...toDoorstep, ...alongRoads, store.point];
         }
       }
     }
@@ -870,14 +977,31 @@ export class Simulation {
     return walkablePath(this.world, from, store.point);
   }
 
-  /** The point a settler at `point` would step onto to reach the road network. */
+  /**
+   * The nearest point from which a settler can join the road network: the flag
+   * he is standing on, the flag of the building he is in, or — for somebody out
+   * in open country, a geologist most of all — the nearest flag he can walk to.
+   *
+   * Finding that flag is what lets him come home along the roads rather than
+   * striking out cross-country the whole way.
+   */
   private flagPointOf(point: number): number | undefined {
     if (this.world.flag[point]) return point;
 
     const buildingId = this.world.building[point];
-    if (!buildingId) return undefined;
+    if (buildingId) return this.buildings.get(buildingId)?.flagPoint;
 
-    return this.buildings.get(buildingId)?.flagPoint;
+    let best: number | undefined;
+    let bestDistance = Number.POSITIVE_INFINITY;
+
+    this.flags.forEach((flag) => {
+      const distance = this.world.grid.distance(point, flag.point);
+      if (distance >= bestDistance || distance > NEAREST_FLAG_RANGE) return;
+      bestDistance = distance;
+      best = flag.point;
+    });
+
+    return best;
   }
 
   /** Takes a returning settler in, with the tool of its trade. */
@@ -1047,6 +1171,14 @@ export class Simulation {
         if (this.advance(settler)) this.finishWalkHome(settler);
         return;
 
+      case SettlerState.DeliveringToFlag:
+        if (this.advance(settler)) this.setDownAtFlag(settler);
+        return;
+
+      case SettlerState.EnteringBuilding:
+        if (this.advance(settler)) this.finishBuildingVisit(settler);
+        return;
+
       case SettlerState.AtWork:
         // Resting between trips out. `updateFieldWork` holds off until this
         // reaches zero.
@@ -1146,11 +1278,11 @@ export class Simulation {
    * been looked at already — sending him back to a spot he has surveyed would
    * teach the player nothing.
    */
-  private surveyTarget(from: number): number | undefined {
+  private surveyTarget(patch: number, from: number): number | undefined {
     const rocky: number[] = [];
     const ground: number[] = [];
 
-    for (const point of this.world.grid.pointsWithin(from, GEOLOGIST_RANGE)) {
+    for (const point of this.world.grid.pointsWithin(patch, GEOLOGIST_RANGE)) {
       if (this.world.resourceKnown[point]) continue;
       if (!this.world.isWalkable(point)) continue;
       if (this.world.building[point] !== 0 || this.world.flag[point] !== 0) continue;
@@ -1192,21 +1324,22 @@ export class Simulation {
     return undefined;
   }
 
-  /** Points the geologist at his next outcrop, or sends him home. */
+  /**
+   * Points the geologist at his next hole, or sends him home.
+   *
+   * He works the ground around the flag he set out from rather than wandering
+   * off wherever the last hole led, and he stays until there is nothing left
+   * within reach that he has not looked at. Every strike marks its node, so the
+   * candidates only ever shrink and the posting always ends.
+   */
   private beginSurvey(settler: Settler): void {
-    if (settler.surveysLeft <= 0) {
-      this.sendHome(settler);
-      return;
-    }
-
-    const target = this.surveyTarget(settler.point);
+    const target = this.surveyTarget(settler.surveyFrom, settler.point);
     const path = target === undefined ? undefined : walkablePath(this.world, settler.point, target);
     if (target === undefined || !path) {
       this.sendHome(settler);
       return;
     }
 
-    settler.surveysLeft -= 1;
     settler.taskPoint = target;
     settler.state = SettlerState.WalkingToTask;
     this.setPath(settler, path);
@@ -1227,7 +1360,10 @@ export class Simulation {
     this.world.resourceKnown[settler.taskPoint] = 1;
 
     if (found !== Resource.None && this.world.resourceAmount[settler.taskPoint]! > 0) {
-      this.note(`A geologist finds ${RESOURCE_NAMES[found]}.`);
+      const category = FIND_CATEGORY[found] ?? MessageCategory.Survey;
+      if (!this.alreadyReported(category, settler.taskPoint, SURVEY_MESSAGE_SPREAD)) {
+        this.note(`A geologist finds ${RESOURCE_NAMES[found]}.`, category, settler.taskPoint);
+      }
     }
 
     this.beginSurvey(settler);
@@ -1304,11 +1440,85 @@ export class Simulation {
       }
     }
 
+    // Carrying something back means stopping at the flag on the way in, so the
+    // player sees the log arrive rather than finding it already stacked there.
+    if (settler.carrying !== null) {
+      this.walkToOwnFlag(settler, building);
+      return;
+    }
+
     const home = walkablePath(this.world, settler.point, building.point);
     settler.state = SettlerState.ReturningHome;
     this.setPath(settler, home ?? []);
     if ((home?.length ?? 0) === 0) {
       // Already home, or hemmed in — deposit immediately rather than stall.
+      settler.point = building.point;
+      this.depositAtHome(settler);
+    }
+  }
+
+  /** Sends a worker to his building's own flag with what he is carrying. */
+  private walkToOwnFlag(settler: Settler, building: Building): void {
+    const path = walkablePath(this.world, settler.point, building.flagPoint);
+
+    settler.state = SettlerState.DeliveringToFlag;
+    this.setPath(settler, path ?? []);
+
+    if ((path?.length ?? 0) === 0) {
+      settler.point = building.flagPoint;
+      this.setDownAtFlag(settler);
+    }
+  }
+
+  /**
+   * A worker puts what he has made on his building's flag and goes back inside.
+   *
+   * If the flag is full he stands there holding it, which is what makes a
+   * backed-up network visible: a line of workers waiting at their own doors
+   * rather than production silently stopping.
+   */
+  private setDownAtFlag(settler: Settler): void {
+    const building = this.buildings.get(settler.building);
+    if (!building || settler.carrying === null) {
+      this.walkBackInside(settler, building);
+      return;
+    }
+
+    const flagId = this.world.flag[building.flagPoint];
+    const flag = flagId ? this.flags.get(flagId) : undefined;
+    if (!flag || flag.wares.length >= FLAG_CAPACITY) return; // Wait, crate in hand.
+
+    const destination = chooseDestination(
+      this.buildings,
+      this.network,
+      flag.id,
+      settler.carrying,
+      building.owner,
+      (candidate) => this.world.flag[candidate.flagPoint] ?? 0,
+    );
+
+    // Nowhere to send it is no reason to stop working: it waits at the flag
+    // until a store or a consumer can be reached again.
+    const bound = destination && destination.building !== building.id ? destination.building : 0;
+    if (bound !== 0) this.reserveIncoming(bound, settler.carrying);
+
+    flag.wares.push({ ware: settler.carrying, destination: bound });
+    settler.carrying = null;
+    building.status = BuildingStatus.Working;
+
+    this.walkBackInside(settler, building);
+  }
+
+  private walkBackInside(settler: Settler, building: Building | undefined): void {
+    if (!building) {
+      this.dismissSettler(settler.id);
+      return;
+    }
+
+    const path = walkablePath(this.world, settler.point, building.point);
+    settler.state = SettlerState.ReturningHome;
+    this.setPath(settler, path ?? []);
+    if ((path?.length ?? 0) === 0) {
       settler.point = building.point;
       this.depositAtHome(settler);
     }
@@ -1496,15 +1706,17 @@ export class Simulation {
     if (flag.building !== 0 && flag.building === parcel.destination) {
       const building = this.buildings.get(flag.building);
       if (building && willAccept(building, parcel.ware)) {
-        this.receiveWare(building, parcel.ware);
-        settler.carrying = null;
-        settler.carryDestination = 0;
-        settler.state = SettlerState.CarrierWaiting;
+        this.enterBuilding(settler, building);
         return;
       }
     }
 
-    if (flag.wares.length >= FLAG_CAPACITY) return; // The flag is full; wait.
+    // A full flag is not the end of the line: put this crate down and take one
+    // away in the same breath, so the count is unchanged and the queue moves.
+    if (flag.wares.length >= FLAG_CAPACITY) {
+      this.swapAtFullFlag(settler, flag, parcel);
+      return;
+    }
 
     // Re-check the route: the network may have changed while walking.
     if (this.nextFlagFor(flag.id, parcel) === undefined && !this.isAcceptableHere(flag, parcel)) {
@@ -1515,6 +1727,93 @@ export class Simulation {
     settler.carrying = null;
     settler.carryDestination = 0;
     settler.state = SettlerState.CarrierWaiting;
+  }
+
+  /**
+   * Trades a crate for one waiting at a full flag.
+   *
+   * Simply waiting for room deadlocks: the crates on a full flag can often only
+   * leave in the hands of the very carrier stood in front of it, and he cannot
+   * free his hands until they go. Both then wait for ever, and every road
+   * behind them silts up. Swapping keeps the flag at its capacity while letting
+   * traffic through in both directions, which is what the original game does.
+   *
+   * If nothing on the flag wants to go back the way he came, he waits — that is
+   * an honestly full flag rather than a knot.
+   */
+  private swapAtFullFlag(settler: Settler, flag: Flag, parcel: WareParcel): void {
+    const road = this.roads.get(settler.road);
+    if (!road) return;
+
+    const beyond = road.fromFlag === flag.id ? road.toFlag : road.fromFlag;
+    const index = flag.wares.findIndex((waiting) => this.nextFlagFor(flag.id, waiting) === beyond);
+    if (index < 0) return;
+
+    const target = this.flags.get(beyond);
+    const path = target && this.pathAlongRoad(road, flag.point, target.point);
+    if (!path) return;
+
+    if (this.nextFlagFor(flag.id, parcel) === undefined && !this.isAcceptableHere(flag, parcel)) {
+      this.retarget(flag, parcel);
+    }
+
+    const taken = flag.wares.splice(index, 1)[0]!;
+    flag.wares.push(parcel);
+
+    settler.carrying = taken.ware;
+    settler.carryDestination = taken.destination;
+    settler.state = SettlerState.CarrierDelivering;
+    settler.taskPoint = beyond;
+    this.setPath(settler, path);
+    if (path.length === 0) this.deliverWare(settler);
+  }
+
+  /**
+   * A carrier takes a delivery through the door rather than posting it from
+   * outside. `building` is remembered on `taskPoint` so the walk back out knows
+   * which flag to return to.
+   */
+  private enterBuilding(settler: Settler, building: Building): void {
+    settler.state = SettlerState.EnteringBuilding;
+
+    const path = walkablePath(this.world, settler.point, building.point);
+    this.setPath(settler, path ?? []);
+    if ((path?.length ?? 0) === 0) {
+      settler.point = building.point;
+      this.finishBuildingVisit(settler);
+    }
+  }
+
+  /**
+   * Either he has just stepped inside with a delivery, or he is back out at the
+   * flag having made it. Carrying tells the two apart.
+   */
+  private finishBuildingVisit(settler: Settler): void {
+    if (settler.carrying === null) {
+      // Back at the door, empty handed, and ready for the next crate.
+      settler.state = SettlerState.CarrierWaiting;
+      return;
+    }
+
+    const building = this.buildings.get(this.world.building[settler.point] ?? 0);
+    if (building && willAccept(building, settler.carrying)) {
+      this.receiveWare(building, settler.carrying);
+    } else if (building) {
+      // It finished, or filled up, while he was walking in. Take it back out
+      // rather than destroying it; `deliverWare` will find it a home.
+      this.releaseIncoming(settler.carryDestination, settler.carrying);
+    }
+
+    settler.carrying = null;
+    settler.carryDestination = 0;
+
+    const flagPoint = building ? building.flagPoint : settler.point;
+    const back = walkablePath(this.world, settler.point, flagPoint);
+    this.setPath(settler, back ?? []);
+    if ((back?.length ?? 0) === 0) {
+      settler.point = flagPoint;
+      settler.state = SettlerState.CarrierWaiting;
+    }
   }
 
   /** True when the building on this flag will actually take the ware in. */
@@ -1576,6 +1875,7 @@ export class Simulation {
 
   private updateBuilding(building: Building): void {
     this.forgetLostWorker(building);
+    this.takeInWaitingWares(building);
 
     if (building.state === BuildingState.UnderConstruction) {
       this.updateConstruction(building);
@@ -1708,9 +2008,30 @@ export class Simulation {
     const info = buildingInfo(building.type);
     if (info.behaviour.kind === 'military') {
       this.claimTerritory(building.point, info.behaviour.radius, building.owner);
+      this.note(`${info.name} completed, claiming new ground.`, MessageCategory.Territory, building.point);
+      return;
     }
 
-    this.note(`${info.name} completed.`);
+    this.note(`${info.name} completed.`, MessageCategory.Built, building.point);
+  }
+
+  /**
+   * A building has run out of whatever it lives on.
+   *
+   * Said once, on the way into that state rather than every tick it stays
+   * there: a woodcutter with no trees left would otherwise repeat itself five
+   * times a second for the rest of the game.
+   */
+  private reportExhausted(building: Building): void {
+    if (building.status === BuildingStatus.Exhausted) return;
+    building.status = BuildingStatus.Exhausted;
+
+    const info = buildingInfo(building.type);
+    this.note(
+      `${info.name}: ${EXHAUSTED_REASON[info.behaviour.kind] ?? 'nothing left within reach'}.`,
+      MessageCategory.Exhausted,
+      building.point,
+    );
   }
 
   /**
@@ -1752,13 +2073,13 @@ export class Simulation {
     const target = this.workTarget(building.point, behaviour);
 
     if (target === undefined) {
-      building.status = BuildingStatus.Exhausted;
+      this.reportExhausted(building);
       return;
     }
 
     const path = walkablePath(this.world, worker.point, target);
     if (!path) {
-      building.status = BuildingStatus.Exhausted;
+      this.reportExhausted(building);
       return;
     }
 
@@ -1792,7 +2113,7 @@ export class Simulation {
     const reach = Math.max(behaviour.radius, SEAM_RADIUS);
     const source = this.findResource(building.point, reach, behaviour.resource);
     if (source === undefined) {
-      building.status = BuildingStatus.Exhausted;
+      this.reportExhausted(building);
       return;
     }
 
@@ -1856,40 +2177,65 @@ export class Simulation {
     return best;
   }
 
-  /** Moves a finished ware out onto the building's flag. */
+  /**
+   * Sends the worker out with what his building has made.
+   *
+   * Nothing appears on a flag by itself any more: a miller carries his flour to
+   * his own door, puts it down, and goes back in. A building with no worker to
+   * send — there is no such producer today, but the guard costs nothing — keeps
+   * its output until one arrives.
+   */
   private pushOutput(building: Building): boolean {
     if (building.output === null) return true;
+
+    const worker = this.settlers.get(building.worker);
+    if (!worker || worker.state !== SettlerState.AtWork) return false;
 
     const flagId = this.world.flag[building.flagPoint];
     if (!flagId) return false;
 
-    const flag = this.flags.require(flagId);
-    if (flag.wares.length >= FLAG_CAPACITY) return false;
+    // He does not set off into a full flag; he waits inside until there is
+    // somewhere to put it.
+    const flag = this.flags.get(flagId);
+    if (!flag || flag.wares.length >= FLAG_CAPACITY) return false;
 
-    const destination = chooseDestination(
-      this.buildings,
-      this.network,
-      flagId,
-      building.output,
-      building.owner,
-      (candidate) => this.world.flag[candidate.flagPoint] ?? 0,
-    );
-
-    // A ware destined for the very building it came from would loop forever.
-    const bound = destination && destination.building !== building.id ? destination.building : 0;
-
-    // Nowhere to send it does not mean nowhere to put it. A woodcutter whose
-    // road has been torn up goes on working and stacks its logs against its own
-    // flag, exactly as it would in the original; the pile is what tells the
-    // player the connection is broken. `retargetStrandedWares` finds these
-    // parcels a home the moment a store or a consumer is reachable again, and
-    // until then no carrier touches them, since `nextFlagFor` cannot route a
-    // parcel bound for nowhere.
-    if (bound !== 0) this.reserveIncoming(bound, building.output);
-    flag.wares.push({ ware: building.output, destination: bound });
+    worker.carrying = building.output;
     building.output = null;
-    building.status = BuildingStatus.Working;
+    worker.taskTimer = 0;
+    this.walkToOwnFlag(worker, building);
     return true;
+  }
+
+  /**
+   * A building takes in anything left standing at its own door.
+   *
+   * A crate normally goes in at the moment a carrier hands it over, but one can
+   * arrive at its destination's own flag by other means — a carrier dismissed
+   * there setting it down, or `retarget` re-homing it to the nearest store,
+   * which from that store's own flag costs nothing at all. Such a crate has no
+   * next hop to be carried to and is already where it belongs, so every sweep
+   * passed over it and it sat there for good.
+   *
+   * Left alone this jams whole provinces: eight of them fill a headquarters
+   * flag and every road behind it silts up, and a single one at a building
+   * site's door leaves it a board short for ever, since the reservation it
+   * still holds tells the network the board is on its way.
+   */
+  private takeInWaitingWares(building: Building): void {
+    const flagId = this.world.flag[building.flagPoint];
+    if (!flagId) return;
+
+    const flag = this.flags.get(flagId);
+    if (!flag) return;
+
+    for (let i = flag.wares.length - 1; i >= 0; i -= 1) {
+      const parcel = flag.wares[i]!;
+      if (parcel.destination !== building.id) continue;
+      if (!willAccept(building, parcel.ware)) continue;
+
+      flag.wares.splice(i, 1);
+      this.receiveWare(building, parcel.ware);
+    }
   }
 
   /** Stores hand out wares that somebody has asked for. */
@@ -1898,7 +2244,13 @@ export class Simulation {
     if (!flagId) return;
 
     const flag = this.flags.require(flagId);
-    if (flag.wares.length >= FLAG_CAPACITY) return;
+
+    // A store must leave room at its own door for deliveries coming the other
+    // way. Left to fill all eight places with goods going out — and a single
+    // two-input workshop can legitimately have eight crates on their way to it
+    // — it walls itself in, and every road bringing anything back jams solid
+    // behind the queue.
+    if (flag.wares.length >= STORE_DISPATCH_LIMIT) return;
 
     // One dispatch per tick keeps a store from flooding its own flag.
     for (let ware = 0 as Ware; ware < WARE_COUNT; ware = (ware + 1) as Ware) {
@@ -2405,7 +2757,7 @@ export class Simulation {
     // geologist, so nought is not merely a safe default but the right one.
     simulation.settlers.adopt(
       snapshot.settlers.pool,
-      snapshot.settlers.items.map((settler) => ({ ...settler, surveysLeft: settler.surveysLeft ?? 0 })),
+      snapshot.settlers.items.map((settler) => ({ ...settler, surveyFrom: settler.surveyFrom ?? 0 })),
     );
 
     return simulation;
@@ -2413,9 +2765,32 @@ export class Simulation {
 
   // ------------------------------------------------------------- reporting
 
-  private note(message: string): void {
-    this.events.push(message);
-    if (this.events.length > 32) this.events.shift();
+  /**
+   * Records something worth telling the player about.
+   *
+   * `point` is where it happened, so the message log can take the player
+   * straight there. `category` lets like messages be recognised — which is how
+   * a geologist working a whole seam produces a handful of lines rather than
+   * one for every hole he digs.
+   */
+  private note(text: string, category: MessageCategory, point = -1): void {
+    this.events.push({ text, category, point, tick: this.tick });
+    if (this.events.length > MESSAGE_LIMIT) this.events.shift();
+  }
+
+  /**
+   * True when the same sort of thing has just been reported close by.
+   *
+   * Without this a geologist's patch would flood the log with sixty near
+   * identical finds and bury everything else.
+   */
+  private alreadyReported(category: MessageCategory, point: number, within: number): boolean {
+    for (let i = this.events.length - 1; i >= 0; i -= 1) {
+      const past = this.events[i]!;
+      if (past.category !== category || past.point < 0) continue;
+      if (this.world.grid.distance(past.point, point) <= within) return true;
+    }
+    return false;
   }
 
   /** Total of a ware held across all of a player's stores. */

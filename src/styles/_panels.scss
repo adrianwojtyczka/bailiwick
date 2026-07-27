@@ -169,3 +169,78 @@
 .gamemenu__item--quit {
   color: $brick;
 }
+
+/**
+ * The message log. Reachable from the unread badge, newest first, and every
+ * line a way of getting to where the thing happened.
+ */
+.messages {
+  @include panel;
+
+  position: absolute;
+  top: calc(env(safe-area-inset-top, 0px) + 3.4rem);
+  right: calc(env(safe-area-inset-right, 0px) + 0.5rem);
+  width: min(26rem, calc(100vw - 1.5rem));
+  max-height: 62vh;
+  padding: 0.85rem;
+  overflow-y: auto;
+
+  &[hidden] {
+    display: none;
+  }
+}
+
+.messages__title {
+  margin: 0 0 0.6rem;
+  font-family: $font-body;
+  font-size: 1.05rem;
+  font-weight: 600;
+  text-align: center;
+}
+
+.messages__list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.messages__item {
+  @include tappable;
+
+  display: flex;
+  gap: 0.55rem;
+  align-items: baseline;
+  width: 100%;
+  padding: 0.45rem 0.55rem;
+  border: 1px solid $rule;
+  border-left-width: 4px;
+  background: rgba(232, 216, 180, 0.55);
+  text-align: left;
+
+  &:disabled {
+    opacity: 0.7;
+  }
+}
+
+.messages__when {
+  flex: 0 0 auto;
+  color: $ink-soft;
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.messages__text {
+  font-size: 0.85rem;
+  line-height: 1.35;
+}
+
+// A colour per kind, so the eye can pick out a category without reading.
+.messages__item--exhausted { border-left-color: #9c4128; }
+.messages__item--territory { border-left-color: $ochre; }
+.messages__item--built { border-left-color: #4a6b32; }
+.messages__item--coal { border-left-color: #38332e; }
+.messages__item--iron { border-left-color: #7d5c4a; }
+.messages__item--gold { border-left-color: #e0b53a; }
+.messages__item--granite { border-left-color: #9a9187; }
+.messages__item--water { border-left-color: #5f92ad; }
+.messages__item--survey { border-left-color: $ink-soft; }

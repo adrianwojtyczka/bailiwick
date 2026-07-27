@@ -136,6 +136,10 @@ export const SettlerState = {
   Building: 9,
   /** Walking back to a store to be taken in again. */
   ReturningToStore: 10,
+  /** A worker carrying what he has made out to his building's flag. */
+  DeliveringToFlag: 11,
+  /** A carrier stepping inside a building to hand a ware over, and back out. */
+  EnteringBuilding: 12,
 } as const;
 
 export type SettlerState = (typeof SettlerState)[keyof typeof SettlerState];
@@ -171,10 +175,10 @@ export interface Settler {
   /** Countdown for felling, planting, building and the like. */
   taskTimer: number;
   /**
-   * Survey stops a geologist has left before he walks home. Zero for everyone
-   * else, and absent in version 1 saves, which predate geologists.
+   * The flag a geologist set out from, and whose ground he is working. Zero for
+   * everyone else, and absent in saves older than version 3.
    */
-  surveysLeft: number;
+  surveyFrom: number;
 }
 
 /** Ticks a settler takes to cross one lattice step on level ground. */

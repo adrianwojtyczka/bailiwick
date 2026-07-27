@@ -88,6 +88,10 @@ export class GameSession {
       },
       placeFlag: (point) => this.run(() => simulation.placeFlag(playerId, point)),
       sendGeologist: (point) => this.run(() => simulation.sendGeologist(playerId, point)),
+      centreOn: (point) => {
+        this.renderer.camera.centreOn(point);
+        this.selectedPoint = point;
+      },
       setSpeed: (speed) => this.loop.setSpeed(speed),
       save: () => void this.save('Manual save'),
       exportSave: () => void this.exportToFile(),

@@ -30,6 +30,9 @@ const DEPOSIT_COLOURS: Readonly<Partial<Record<Resource, string>>> = {
   [Resource.Water]: '#5f92ad',
 };
 
+/** Ground a geologist has dug and found nothing in. */
+const BARREN_COLOUR = 'rgba(90, 80, 68, 0.55)';
+
 /** Zoom is snapped to these steps before terrain is baked, so panning at a
  *  slightly wobbling pinch zoom doesn't rebake every chunk every frame. */
 const ZOOM_STEPS = [0.5, 0.65, 0.8, 1, 1.25, 1.6, 2, 2.4];
@@ -203,14 +206,17 @@ export class CanvasRenderer implements Renderer {
       for (let col = bounds.minCol; col <= bounds.maxCol; col += 1) {
         const point = grid.index(col, row);
         if (!world.resourceKnown[point]) continue;
-        if ((world.resourceAmount[point] ?? 0) <= 0) continue;
 
-        const colour = DEPOSIT_COLOURS[world.resource[point] as Resource];
+        // Surveyed and barren is worth saying: without a mark of its own the
+        // player cannot tell ground that was dug and held nothing from ground
+        // nobody has looked at.
+        const barren = (world.resourceAmount[point] ?? 0) <= 0;
+        const colour = barren ? BARREN_COLOUR : DEPOSIT_COLOURS[world.resource[point] as Resource];
         if (!colour) continue;
 
         const x = this.screenX(point);
         const y = this.screenY(point);
-        const size = 2.6 * camera.zoom;
+        const size = (barren ? 1.5 : 2.6) * camera.zoom;
 
         // A small diamond, which reads as a survey mark rather than as
         // something standing on the ground.
