@@ -745,7 +745,7 @@ describe('roads and building sites', () => {
 
 describe('drawing between ticks', () => {
   it('advances a walking settler part way through the coming tick', () => {
-    // A tick is 150ms of real time at the normal pace, so a settler that only
+    // A tick is 200ms of real time at the normal pace, so a settler that only
     // moved when a tick landed would visibly stutter. The renderer asks for a
     // position part way into the next tick instead.
     const sim = newGame();
@@ -777,5 +777,157 @@ describe('drawing between ticks', () => {
     for (const settler of sim.settlers.all()) {
       expect(sim.stepFraction(settler)).toBe(sim.stepFraction(settler, 0));
     }
+  });
+});
+
+describe('walking home again', () => {
+  /** Builds a woodcutter and runs until it is finished, or gives up. */
+  function buildUntilComplete(sim: Simulation): number {
+    const id = buildAndConnect(sim, BuildingType.Woodcutter, MapObject.Tree)!;
+    expect(id).toBeDefined();
+
+    for (let i = 0; i < 3000; i += 1) {
+      sim.update();
+      if (sim.buildings.require(id).state === BuildingState.Complete) return id;
+    }
+
+    throw new Error('the woodcutter never finished');
+  }
+
+  it('leaves the builder on the map, walking, once the work is done', () => {
+    const sim = newGame();
+    buildUntilComplete(sim);
+
+    const walking = sim.settlers.all().filter((s) => s.state === SettlerState.ReturningToStore);
+    expect(walking).toHaveLength(1);
+    expect(walking[0]!.path.length).toBeGreaterThan(0);
+  });
+
+  it('counts the builder once the whole way home, never twice and never not at all', () => {
+    // Crediting the store on setting off would show a man in two places; only
+    // crediting him on arrival, but removing him early, would lose him.
+    const sim = newGame();
+    const before = sim.population(PLAYER);
+
+    const id = buildAndConnect(sim, BuildingType.Woodcutter, MapObject.Tree)!;
+    for (let i = 0; i < 1200; i += 1) {
+      sim.update();
+      expect(sim.population(PLAYER)).toBe(before);
+    }
+
+    expect(sim.buildings.require(id).state).toBe(BuildingState.Complete);
+  });
+
+  it('takes the builder in at the headquarters when he gets there', () => {
+    const sim = newGame();
+    const hq = headquarters(sim);
+    buildUntilComplete(sim);
+
+    const reserveOnFinishing = hq.reserve;
+    run(sim, 400);
+
+    expect(sim.settlers.all().some((s) => s.state === SettlerState.ReturningToStore)).toBe(false);
+    expect(hq.reserve).toBe(reserveOnFinishing + 1);
+  });
+
+  it('gets the builder home even when his road is torn up under him', () => {
+    const sim = newGame();
+    const before = sim.population(PLAYER);
+    buildUntilComplete(sim);
+
+    const walker = sim.settlers.all().find((s) => s.state === SettlerState.ReturningToStore)!;
+    expect(walker).toBeDefined();
+
+    const road = sim.roads.all()[0]!;
+    expect(sim.demolishRoad(PLAYER, road.points[1]!).ok).toBe(true);
+
+    run(sim, 600);
+
+    expect(sim.settlers.has(walker.id)).toBe(false);
+    expect(sim.population(PLAYER)).toBe(before);
+  });
+});
+
+describe('resting between trips out', () => {
+  it('keeps a worker indoors for a while after he brings something back', () => {
+    const sim = newGame();
+    const id = buildAndConnect(sim, BuildingType.Woodcutter, MapObject.Tree)!;
+
+    // Catch the moment he steps back through his own door.
+    let restingFor = 0;
+    for (let i = 0; i < 4000 && restingFor === 0; i += 1) {
+      sim.update();
+      const worker = sim.settlers.get(sim.buildings.require(id).worker);
+      if (worker?.state === SettlerState.AtWork && worker.taskTimer > 0) {
+        restingFor = worker.taskTimer;
+      }
+    }
+
+    expect(restingFor).toBeGreaterThan(0);
+
+    // He is still inside on the next tick rather than straight back out.
+    sim.update();
+    const worker = sim.settlers.get(sim.buildings.require(id).worker)!;
+    expect(worker.state).toBe(SettlerState.AtWork);
+    expect(worker.taskTimer).toBe(restingFor - 1);
+  });
+
+  it('sends him out again once he has had his rest', () => {
+    const sim = newGame();
+    buildAndConnect(sim, BuildingType.Woodcutter, MapObject.Tree);
+    run(sim, 900);
+
+    // A rest that never ended would leave the hut producing nothing at all.
+    const before = sim.storedWare(PLAYER, Ware.Log);
+    run(sim, 3000);
+    expect(sim.storedWare(PLAYER, Ware.Log)).toBeGreaterThan(before);
+  });
+});
+
+describe('a carrier with nothing to carry', () => {
+  /** The point on a road where its carrier waits. */
+  function post(road: { points: number[] }): number {
+    return road.points[Math.floor(road.points.length / 2)]!;
+  }
+
+  it('walks back to the middle of its stretch', () => {
+    const sim = newGame();
+    buildAndConnect(sim, BuildingType.Woodcutter, MapObject.Tree);
+    run(sim, 1200);
+
+    const road = sim.roads.all()[0]!;
+    const carrier = sim.settlers.require(road.carrier);
+
+    // Strand him at one end, as finishing a delivery there would.
+    carrier.state = SettlerState.CarrierWaiting;
+    carrier.point = road.points[0]!;
+    carrier.fromPoint = carrier.point;
+    carrier.toPoint = carrier.point;
+    carrier.path = [];
+    carrier.pathIndex = 0;
+
+    run(sim, 400);
+
+    expect(sim.settlers.require(road.carrier).point).toBe(post(road));
+  });
+
+  it('still gets on with the job while it strolls', () => {
+    const sim = newGame();
+    buildAndConnect(sim, BuildingType.Woodcutter, MapObject.Tree);
+    run(sim, 1500);
+
+    const road = sim.roads.all()[0]!;
+    const carrier = sim.settlers.require(road.carrier);
+    carrier.state = SettlerState.CarrierWaiting;
+    carrier.point = road.points[0]!;
+    carrier.fromPoint = carrier.point;
+    carrier.toPoint = carrier.point;
+    carrier.path = [];
+    carrier.pathIndex = 0;
+
+    // Work has to win over the stroll, or the logs would never come in.
+    const before = sim.storedWare(PLAYER, Ware.Log);
+    run(sim, 3000);
+    expect(sim.storedWare(PLAYER, Ware.Log)).toBeGreaterThan(before);
   });
 });

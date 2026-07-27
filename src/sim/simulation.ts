@@ -50,6 +50,15 @@ const TREE_GROWTH_INTERVAL = 260;
 /** How often stranded wares are given a new destination. */
 const STRANDED_SWEEP_INTERVAL = 40;
 
+/**
+ * How long a worker rests indoors between trips out.
+ *
+ * A woodcutter who turned straight round and left again read as frantic rather
+ * than industrious. Six seconds of quiet is enough to see the door close behind
+ * him and open again, which is what makes the cycle legible.
+ */
+const WORKER_REST_TICKS = 30;
+
 /** Wares and settlers a player begins with. */
 const STARTING_STOCK: readonly { ware: Ware; count: number }[] = [
   { ware: Ware.Board, count: 24 },
@@ -671,19 +680,85 @@ export class Simulation {
   }
 
   /**
-   * Returns a settler to a store, along with the tool of its trade.
+   * Starts a settler walking back to a store, along with the tool of its trade.
    *
    * Settlers are not consumed by taking a job: remodelling a road network or
    * demolishing a building hands the people back, and their tools with them.
    * Losing either would slowly starve a long game of both.
+   *
+   * The walk is what the player sees — a builder who has just finished a house
+   * should be seen leaving it, not blink out on the doorstep — so the man is
+   * only counted back into the store when he actually arrives.
    */
   private sendHome(settler: Settler): void {
-    const store = this.storeFor(settler.owner);
-    if (store) {
-      store.reserve += 1;
-      const tool = professionInfo(settler.profession).tool;
-      if (tool !== null) store.stock[tool] = (store.stock[tool] ?? 0) + 1;
+    settler.building = 0;
+    settler.road = 0;
+    settler.carrying = null;
+    settler.carryDestination = 0;
+    settler.taskTimer = 0;
+
+    const store = this.nearestStore(settler.owner, settler.point);
+    if (!store) {
+      // Nowhere to go home to. Nothing is gained by leaving him standing.
+      this.settlers.remove(settler.id);
+      return;
     }
+
+    const path = this.pathHome(settler.point, store);
+    if (!path) {
+      // Cut off with no way through: take him in on the spot rather than
+      // strand him somewhere he can never walk out of.
+      this.arriveAtStore(settler, store);
+      return;
+    }
+
+    settler.building = store.id;
+    settler.state = SettlerState.ReturningToStore;
+    this.setPath(settler, path);
+    if (path.length === 0) this.arriveAtStore(settler, store);
+  }
+
+  /**
+   * The way back to a store's door: along the roads when they reach, across
+   * open ground when they no longer do.
+   *
+   * A settler standing in a building steps out to its flag first, which is how
+   * a builder leaving a finished house joins the network he arrived on.
+   */
+  private pathHome(from: number, store: Building): number[] | undefined {
+    const storeFlag = this.world.flag[store.flagPoint];
+
+    if (storeFlag) {
+      const doorstep = this.flagPointOf(from);
+      const startFlag = doorstep === undefined ? 0 : this.world.flag[doorstep];
+
+      if (startFlag) {
+        const alongRoads = roadPointPath(this.network, this.roads, startFlag, storeFlag);
+        if (alongRoads) {
+          const toDoorstep = doorstep === from ? [] : [doorstep!];
+          return [...toDoorstep, ...alongRoads, store.point];
+        }
+      }
+    }
+
+    return walkablePath(this.world, from, store.point);
+  }
+
+  /** The point a settler at `point` would step onto to reach the road network. */
+  private flagPointOf(point: number): number | undefined {
+    if (this.world.flag[point]) return point;
+
+    const buildingId = this.world.building[point];
+    if (!buildingId) return undefined;
+
+    return this.buildings.get(buildingId)?.flagPoint;
+  }
+
+  /** Takes a returning settler in, with the tool of its trade. */
+  private arriveAtStore(settler: Settler, store: Building): void {
+    store.reserve += 1;
+    const tool = professionInfo(settler.profession).tool;
+    if (tool !== null) store.stock[tool] = (store.stock[tool] ?? 0) + 1;
     this.settlers.remove(settler.id);
   }
 
@@ -773,14 +848,7 @@ export class Simulation {
         return;
 
       case SettlerState.ReturningHome:
-        if (this.advance(settler)) {
-          settler.state = SettlerState.AtWork;
-          const building = this.buildings.get(settler.building);
-          if (building && settler.carrying !== null && building.output === null) {
-            building.output = settler.carrying;
-          }
-          settler.carrying = null;
-        }
+        if (this.advance(settler)) this.depositAtHome(settler);
         return;
 
       case SettlerState.CarrierCollecting:
@@ -792,7 +860,7 @@ export class Simulation {
         return;
 
       case SettlerState.CarrierWaiting:
-        this.lookForWork(settler);
+        if (!this.lookForWork(settler)) this.strollToPost(settler);
         return;
 
       case SettlerState.Building:
@@ -803,11 +871,64 @@ export class Simulation {
         this.workOnSite(settler);
         return;
 
-      case SettlerState.AtWork:
-      case SettlerState.Idle:
       case SettlerState.ReturningToStore:
+        if (this.advance(settler)) this.finishWalkHome(settler);
+        return;
+
+      case SettlerState.AtWork:
+        // Resting between trips out. `updateFieldWork` holds off until this
+        // reaches zero.
+        if (settler.taskTimer > 0) settler.taskTimer -= 1;
+        return;
+
+      case SettlerState.Idle:
         return;
     }
+  }
+
+  /**
+   * A worker is back at his workplace with whatever he went out for. He puts it
+   * down and takes a breather before setting off again.
+   */
+  private depositAtHome(settler: Settler): void {
+    settler.state = SettlerState.AtWork;
+    settler.taskTimer = WORKER_REST_TICKS;
+
+    const building = this.buildings.get(settler.building);
+    if (building && settler.carrying !== null && building.output === null) {
+      building.output = settler.carrying;
+    }
+    settler.carrying = null;
+  }
+
+  /**
+   * A settler walking home has reached the end of his path.
+   *
+   * The store he set out for may have been demolished while he walked, so the
+   * arrival is re-checked rather than assumed; failing that he looks for
+   * another, and only vanishes when his people have nowhere left to take him.
+   */
+  private finishWalkHome(settler: Settler): void {
+    const store = this.buildings.get(settler.building);
+    if (store && isStore(store) && store.point === settler.point) {
+      this.arriveAtStore(settler, store);
+      return;
+    }
+
+    const other = this.nearestStore(settler.owner, settler.point);
+    if (!other) {
+      this.settlers.remove(settler.id);
+      return;
+    }
+
+    const path = this.pathHome(settler.point, other);
+    if (!path || path.length === 0) {
+      this.arriveAtStore(settler, other);
+      return;
+    }
+
+    settler.building = other.id;
+    this.setPath(settler, path);
   }
 
   private arriveAtJob(settler: Settler): void {
@@ -894,16 +1015,14 @@ export class Simulation {
     if ((home?.length ?? 0) === 0) {
       // Already home, or hemmed in — deposit immediately rather than stall.
       settler.point = building.point;
-      settler.state = SettlerState.AtWork;
-      if (settler.carrying !== null && building.output === null) building.output = settler.carrying;
-      settler.carrying = null;
+      this.depositAtHome(settler);
     }
   }
 
   private workOnSite(settler: Settler): void {
     const building = this.buildings.get(settler.building);
     if (!building || building.state === BuildingState.Complete) {
-      this.returnToStore(settler);
+      this.sendHome(settler);
       return;
     }
 
@@ -913,15 +1032,6 @@ export class Simulation {
     if (building.buildProgress < buildingInfo(building.type).buildTicks) return;
 
     this.completeConstruction(building);
-    this.returnToStore(settler);
-  }
-
-  private returnToStore(settler: Settler): void {
-    settler.building = 0;
-    settler.road = 0;
-    settler.carrying = null;
-    // The builder melts back into the population, hammer and all; tracking the
-    // walk home would cost more than it adds.
     this.sendHome(settler);
   }
 
@@ -936,12 +1046,14 @@ export class Simulation {
    * behind it, until the far flag filled and the whole stretch deadlocked.
    * Starting from where it stands makes the carrier ping-pong instead, which is
    * both livelier to watch and free of that trap.
+   *
+   * Returns true when it found something to do.
    */
-  private lookForWork(settler: Settler): void {
+  private lookForWork(settler: Settler): boolean {
     const road = this.roads.get(settler.road);
     if (!road) {
       this.dismissSettler(settler.id);
-      return;
+      return true;
     }
 
     const position = road.points.indexOf(settler.point);
@@ -971,8 +1083,35 @@ export class Simulation {
       settler.taskPoint = here;
       this.setPath(settler, path);
       if (path.length === 0) this.collectWare(settler);
+      return true;
+    }
+
+    return false;
+  }
+
+  /**
+   * With nothing to carry, a carrier walks back to the middle of his stretch —
+   * the same post a newly hired one is sent to, so his resting place is the
+   * same whether he has just arrived or just finished a delivery. Standing
+   * where the last crate happened to be dropped made a quiet road look
+   * lopsided.
+   *
+   * Work always wins: `lookForWork` runs first each tick and simply replaces
+   * the stroll wherever it has got to.
+   */
+  private strollToPost(settler: Settler): void {
+    if (settler.path.length > 0) {
+      this.advance(settler);
       return;
     }
+
+    const road = this.roads.get(settler.road);
+    if (!road) return;
+
+    const post = road.points[Math.floor(road.points.length / 2)]!;
+    if (settler.point === post) return;
+
+    this.setPath(settler, this.pathAlongRoad(road, settler.point, post) ?? []);
   }
 
   private collectWare(settler: Settler): void {
@@ -1238,6 +1377,12 @@ export class Simulation {
   private updateFieldWork(building: Building, behaviour: FieldWork): void {
     const worker = this.settlers.get(building.worker);
     if (!worker || worker.state !== SettlerState.AtWork) return;
+
+    // Still resting from the last trip.
+    if (worker.taskTimer > 0) {
+      building.status = BuildingStatus.Working;
+      return;
+    }
 
     const target =
       behaviour.kind === 'harvest'
@@ -1540,6 +1685,37 @@ export class Simulation {
       if (building.owner === owner && isStore(building)) best = building;
     });
     return best;
+  }
+
+  /**
+   * The store a settler at `from` should walk back to.
+   *
+   * Distance by road decides it, mirroring `supplierFor` in the other
+   * direction; a settler with no road under him falls back on the first store,
+   * since he will be crossing open ground anyway.
+   */
+  private nearestStore(owner: number, from: number): Building | undefined {
+    const doorstep = this.flagPointOf(from);
+    const fromFlag = doorstep === undefined ? 0 : this.world.flag[doorstep];
+    if (!fromFlag) return this.storeFor(owner);
+
+    let best: Building | undefined;
+    let bestCost = Number.POSITIVE_INFINITY;
+
+    this.buildings.forEach((building) => {
+      if (building.owner !== owner || !isStore(building)) return;
+
+      const flagId = this.world.flag[building.flagPoint];
+      if (!flagId) return;
+
+      const cost = flagId === fromFlag ? 0 : this.network.cost(flagId, fromFlag);
+      if (cost === undefined || cost >= bestCost) return;
+
+      bestCost = cost;
+      best = building;
+    });
+
+    return best ?? this.storeFor(owner);
   }
 
   /** The cheapest store that can supply a settler, and optionally a tool. */

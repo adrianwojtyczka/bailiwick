@@ -181,6 +181,11 @@ export class CanvasRenderer implements Renderer {
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
 
+    // Every stretch goes into one path so the dark outline is laid down under
+    // all of it at once; stroking road by road would let one road's outline
+    // cut across its neighbour's surface at a junction.
+    ctx.beginPath();
+
     this.simulation.roads.forEach((road) => {
       // Cheap rejection: skip roads whose ends are both off screen.
       const firstRow = grid.yOf(road.points[0]!);
@@ -188,20 +193,31 @@ export class CanvasRenderer implements Renderer {
       if (Math.max(firstRow, lastRow) < bounds.minRow) return;
       if (Math.min(firstRow, lastRow) > bounds.maxRow) return;
 
-      ctx.beginPath();
       ctx.moveTo(this.screenX(road.points[0]!), this.screenY(road.points[0]!));
       for (let i = 1; i < road.points.length; i += 1) {
         ctx.lineTo(this.screenX(road.points[i]!), this.screenY(road.points[i]!));
       }
-
-      ctx.strokeStyle = 'rgba(51, 38, 26, 0.5)';
-      ctx.lineWidth = 7 * camera.zoom;
-      ctx.stroke();
-
-      ctx.strokeStyle = '#c8ab72';
-      ctx.lineWidth = 4.5 * camera.zoom;
-      ctx.stroke();
     });
+
+    // The step from a building's door to its own flag. The simulation keeps no
+    // road there — it is implied by the building — but everyone who works the
+    // place walks it, and leaving it undrawn made buildings read as detached
+    // from the network they plainly belong to.
+    this.simulation.buildings.forEach((building) => {
+      const row = grid.yOf(building.point);
+      if (row < bounds.minRow - 1 || row > bounds.maxRow + 1) return;
+
+      ctx.moveTo(this.screenX(building.point), this.screenY(building.point));
+      ctx.lineTo(this.screenX(building.flagPoint), this.screenY(building.flagPoint));
+    });
+
+    ctx.strokeStyle = 'rgba(51, 38, 26, 0.5)';
+    ctx.lineWidth = 7 * camera.zoom;
+    ctx.stroke();
+
+    ctx.strokeStyle = '#c8ab72';
+    ctx.lineWidth = 4.5 * camera.zoom;
+    ctx.stroke();
   }
 
   private drawBuildSpaces(bounds: ReturnType<Camera['visibleBounds']>, view: ViewState): void {

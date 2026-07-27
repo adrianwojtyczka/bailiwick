@@ -7,8 +7,11 @@ import { TICKS_PER_SECOND } from '../sim/simulation';
  * in ticks, so pacing the whole game is a matter of deciding how much real time
  * one tick takes rather than rebalancing every building. Turn this one number
  * up to make the game brisker.
+ *
+ * A quarter puts the game at five ticks a second, or an even 200ms each —
+ * whole numbers wherever the pace is reasoned about, which a third was not.
  */
-export const BASE_SPEED = 1 / 3;
+export const BASE_SPEED = 1 / 4;
 
 /**
  * Fixed-timestep game loop.
