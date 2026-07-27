@@ -99,7 +99,7 @@ export class Hud {
     this.playerId = playerId;
     this.callbacks = callbacks;
 
-    this.unread = el('button', { class: 'hud__unread', type: 'button', hidden: true });
+    this.unread = el('button', { class: 'hud__unread', type: 'button' });
     this.unread.addEventListener('click', () => this.toggleMessages());
     this.ticker = el('div', { class: 'hud__ticker', 'aria-live': 'polite' });
     this.messages = el('div', { class: 'messages', hidden: true });
@@ -134,6 +134,7 @@ export class Hud {
     this.renderActions();
     this.renderBuildMenu();
     this.renderMenu();
+    this.renderUnread();
   }
 
   /** Called every frame; keeps DOM writes to what has actually changed. */
@@ -170,14 +171,21 @@ export class Hud {
     this.ticker.classList.toggle('hud__ticker--warning', this.state.notice !== null);
   }
 
-  /** How many messages have arrived since the log was last opened. */
+  /**
+   * The way into the message log, and how many are waiting.
+   *
+   * Always present, even with nothing to read — a button that appears only once
+   * something has happened is a button nobody knows is there, and there is no
+   * other way back to the log once it has been read.
+   */
   private renderUnread(): void {
     const count = Math.max(0, this.simulation.events.length - this.readCount);
-    this.unread.hidden = count === 0;
-    this.unread.textContent = count > 9 ? '9+' : String(count);
+
+    this.unread.textContent = count === 0 ? '✉' : count > 9 ? '9+' : String(count);
+    this.unread.classList.toggle('hud__unread--waiting', count > 0);
     this.unread.setAttribute(
       'aria-label',
-      `${count} unread message${count === 1 ? '' : 's'}`,
+      count === 0 ? 'Messages' : `Messages, ${count} unread`,
     );
   }
 

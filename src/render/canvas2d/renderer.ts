@@ -134,8 +134,11 @@ export class CanvasRenderer implements Renderer {
     );
     ctx.restore();
 
-    this.drawBorders(bounds);
+    // Survey marks go down first: they sit on the same points the frontier
+    // does, and a border the player cannot see is far worse than a deposit
+    // mark with a dot on it.
     this.drawDeposits(bounds);
+    this.drawBorders(bounds);
     this.drawRoads(bounds);
     if (view.buildSpaceOverlay !== null) this.drawBuildSpaces(bounds, view);
     if (view.roadPreview) this.drawRoadPreview(view.roadPreview);

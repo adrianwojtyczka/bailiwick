@@ -58,14 +58,16 @@
   padding: 0.35rem 0.6rem;
   border: 1px solid $rule;
   border-radius: 999px;
-  background: $ochre;
-  color: $parchment;
+  background: $parchment-deep;
+  color: $ink;
   font-variant-numeric: tabular-nums;
   font-weight: 700;
+}
 
-  &[hidden] {
-    display: none;
-  }
+/** Something waiting to be read, so the button asks to be pressed. */
+.hud__unread--waiting {
+  background: $ochre;
+  color: $parchment;
 }
 
 .hud__menubutton {

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { BuildingType, buildingInfo } from './data/buildings';
+import { DIRECTIONS } from './core/direction';
 import { Profession } from './data/professions';
 import { Ware } from './data/wares';
 import { BuildingState, BuildingStatus, FLAG_CAPACITY, SettlerState } from './entities/types';
@@ -12,7 +13,7 @@ import {
   canPlaceFlag,
   evaluateBuildSpace,
 } from './world/buildspace';
-import { FIELD_FULLY_GROWN, MapObject, Resource } from './world/terrain';
+import { FIELD_FULLY_GROWN, MapObject, Resource, Terrain } from './world/terrain';
 
 const PLAYER = 1;
 
@@ -84,6 +85,60 @@ function buildAndConnect(
 
 function run(sim: Simulation, ticks: number): void {
   for (let i = 0; i < ticks; i += 1) sim.update();
+}
+
+/** Places a well on ground that actually has water under it, and connects it. */
+function buildOverWater(sim: Simulation): number | undefined {
+  const hq = headquarters(sim);
+  const info = buildingInfo(BuildingType.Well);
+
+  for (const point of sim.world.grid.pointsWithin(hq.point, 9)) {
+    if (sim.world.grid.distance(hq.point, point) < 3) continue;
+    const space = evaluateBuildSpace(sim.world, point, PLAYER);
+    if (space === BuildSpace.None || !canHostSize(space, info.size)) continue;
+
+    const wet = sim.world.grid
+      .pointsWithin(point, 2)
+      .some(
+        (near) =>
+          sim.world.resource[near] === Resource.Water && sim.world.resourceAmount[near]! > 0,
+      );
+    if (!wet) continue;
+
+    if (!sim.placeBuilding(PLAYER, point, BuildingType.Well).ok) continue;
+    const well = sim.buildings.find((candidate) => candidate.point === point)!;
+    const route = planRoad(sim.world, hq.flagPoint, well.flagPoint, PLAYER);
+    if (route) sim.placeRoad(PLAYER, route);
+    return well.id;
+  }
+
+  return undefined;
+}
+
+/** A flag placed as near groundwater as the starting territory allows. */
+function flagNearWater(sim: Simulation): number | undefined {
+  const hq = headquarters(sim);
+
+  let best: number | undefined;
+  let bestWater = 0;
+
+  for (const point of sim.world.grid.pointsWithin(hq.point, 9)) {
+    if (!canPlaceFlag(sim.world, point, PLAYER)) continue;
+    const water = sim.world.grid
+      .pointsWithin(point, 4)
+      .filter((near) => sim.world.resource[near] === Resource.Water).length;
+    if (water > bestWater) {
+      bestWater = water;
+      best = point;
+    }
+  }
+
+  if (best === undefined) return undefined;
+  if (!sim.placeFlag(PLAYER, best).ok) return undefined;
+
+  const route = planRoad(sim.world, hq.flagPoint, best, PLAYER);
+  if (route) sim.placeRoad(PLAYER, route);
+  return best;
 }
 
 /**
@@ -356,7 +411,7 @@ describe('determinism', () => {
     // deliberately, never reflexively.
     const sim = newGame(4242);
     run(sim, 1000);
-    expect(sim.hash()).toMatchInlineSnapshot(`"de241a8d"`);
+    expect(sim.hash()).toMatchInlineSnapshot(`"477f301f"`);
   });
 });
 
@@ -690,7 +745,10 @@ describe('working away from the building', () => {
     // Extraction with no radius happens where the building stands, so this one
     // must not have picked up the fisherman's wandering.
     const sim = newGame();
-    const id = buildAndConnect(sim, BuildingType.Well)!;
+    // A well has to stand over groundwater, which no longer lies under sand or
+    // against the mountains — so the site is chosen for its water.
+    const id = buildOverWater(sim)!;
+    expect(id).toBeDefined();
     run(sim, 4000);
 
     const well = sim.buildings.require(id);
@@ -962,11 +1020,19 @@ describe('a carrier with nothing to carry', () => {
 
 describe('the farm', () => {
   /**
+   * A seeded island with real farmland near the start.
+   *
+   * The usual test seed opens on sand and steppe, where a farm correctly
+   * reports itself exhausted: corn now needs six sides of meadow and clear
+   * ground all round, so there is nowhere at all to sow.
+   */
+  const FARMING_SEED = 726;
+
+  /**
    * Places a farm on ground that can actually grow corn.
    *
-   * A farm only sows within two nodes of itself, so it has to stand on meadow
-   * to be any use at all — put one in the desert and it reports itself
-   * exhausted, which is correct but makes for a poor test of farming.
+   * A farm only sows within two nodes of itself, so it has to stand in open
+   * meadow to be any use at all.
    */
   function buildFarm(sim: Simulation): number | undefined {
     const hq = headquarters(sim);
@@ -982,7 +1048,7 @@ describe('the farm', () => {
 
       const soil = sim.world.grid
         .pointsWithin(point, 2)
-        .filter((near) => sim.world.farmableSides(near) >= 4).length;
+        .filter((near) => sim.world.farmableSides(near) === 6).length;
       if (soil > bestSoil) {
         bestSoil = soil;
         best = point;
@@ -999,7 +1065,7 @@ describe('the farm', () => {
   }
 
   it('sows fields, lets them ripen, and cuts them for grain', () => {
-    const sim = newGame();
+    const sim = newGame(FARMING_SEED);
     const id = buildFarm(sim)!;
     expect(id).toBeDefined();
 
@@ -1025,7 +1091,7 @@ describe('the farm', () => {
   });
 
   it('sows only where the ground will take corn', () => {
-    const sim = newGame();
+    const sim = newGame(FARMING_SEED);
     const id = buildFarm(sim)!;
     run(sim, 12000);
 
@@ -1077,13 +1143,15 @@ describe('geologists', () => {
   });
 
   it('prospects for water when there is no rock within reach', () => {
-    // The headquarters stands on levelled ground with no mountain near it, so
-    // a geologist sent from its own flag has only groundwater to look for.
+    // Sent into open country with no mountain near it, a geologist has only
+    // groundwater to look for — and groundwater no longer lies everywhere, so
+    // the flag is put where there is some.
     const sim = newGame();
-    const hq = headquarters(sim);
+    const flag = flagNearWater(sim);
+    expect(flag).toBeDefined();
 
-    expect(sim.sendGeologist(PLAYER, hq.flagPoint).ok).toBe(true);
-    run(sim, 4000);
+    expect(sim.sendGeologist(PLAYER, flag!).ok).toBe(true);
+    run(sim, 12000);
 
     const wells = [...sim.world.resourceKnown.keys()].filter(
       (point) =>
@@ -1626,5 +1694,196 @@ describe('messages', () => {
       expect(message.point).toBeGreaterThanOrEqual(0);
       expect(message.tick).toBeGreaterThan(0);
     }
+  });
+});
+
+describe('where water lies', () => {
+  it('never sits on sand, rock, or within two nodes of either', () => {
+    const dry = new Set<number>([
+      Terrain.Desert,
+      Terrain.Mountain,
+      Terrain.MountainMeadow,
+      Terrain.Snow,
+      Terrain.Lava,
+    ]);
+
+    const sim = newGame(726);
+    const world = sim.world;
+    const triangles = new Int32Array(6);
+
+    let wells = 0;
+    for (let point = 0; point < world.grid.size; point += 1) {
+      if (world.resource[point] !== Resource.Water) continue;
+      wells += 1;
+
+      for (const near of world.grid.pointsWithin(point, 2)) {
+        world.trianglesAroundPoint(near, triangles);
+        for (let i = 0; i < 6; i += 1) {
+          const triangle = triangles[i]!;
+          if (triangle < 0) continue;
+          expect(dry.has(world.terrainOfTriangle(triangle))).toBe(false);
+        }
+      }
+    }
+
+    // Still plenty of it, or the rule would have made wells unbuildable.
+    expect(wells).toBeGreaterThan(100);
+  });
+});
+
+describe('sharing a ware between trades', () => {
+  /** How much of a ware a building is holding right now. */
+  function holding(sim: Simulation, id: number, ware: Ware): number {
+    const building = sim.buildings.require(id);
+    const behaviour = buildingInfo(building.type).behaviour;
+    if (behaviour.kind !== 'craft') return 0;
+
+    let held = 0;
+    for (let i = 0; i < behaviour.inputs.length; i += 1) {
+      if (behaviour.inputs[i]!.ware === ware) held += building.inputs[i]!;
+    }
+    return held;
+  }
+
+  it('feeds two different kinds of consumer, not just the nearer', () => {
+    const sim = newGame();
+    const hq = headquarters(sim);
+
+    // Two trades that both burn coal, at different distances from the store.
+    const smelter = buildAndConnect(sim, BuildingType.IronSmelter)!;
+    const armoury = buildAndConnect(sim, BuildingType.Armoury)!;
+    expect(smelter).toBeDefined();
+    expect(armoury).toBeDefined();
+
+    run(sim, 12000);
+
+    // Coal and nothing else, so neither can burn what it is given and what
+    // each was sent is still sitting in it at the end.
+    hq.stock[Ware.Coal] = 40;
+    run(sim, 20000);
+
+    expect(holding(sim, smelter, Ware.Coal)).toBeGreaterThan(0);
+    expect(holding(sim, armoury, Ware.Coal)).toBeGreaterThan(0);
+  });
+
+  it('sends every log to the nearer of two mills of one kind', () => {
+    const sim = newGame();
+    const hq = headquarters(sim);
+
+    const first = buildAndConnect(sim, BuildingType.Sawmill)!;
+    const second = buildAndConnect(sim, BuildingType.Sawmill)!;
+    expect(first).toBeDefined();
+    expect(second).toBeDefined();
+
+    run(sim, 12000);
+
+    // Watch where the logs actually go, since a mill saws them as they arrive.
+    hq.stock[Ware.Log] = 40;
+
+    let firstAt = -1;
+    let secondAt = -1;
+    for (let i = 0; i < 20000; i += 1) {
+      sim.update();
+      if (firstAt < 0 && holding(sim, first, Ware.Log) > 0) firstAt = i;
+      if (secondAt < 0 && holding(sim, second, Ware.Log) > 0) secondAt = i;
+    }
+
+    // One kind of building, so distance alone decides. The nearer mill is
+    // supplied first and only the overflow — once it is full — reaches the
+    // other, which is what makes building a mill beside the wood worthwhile.
+    expect(firstAt).toBeGreaterThanOrEqual(0);
+    const nearer = sim.buildings.require(first);
+    const further = sim.buildings.require(second);
+    const nearerCost = sim.world.grid.distance(hq.flagPoint, nearer.flagPoint);
+    const furtherCost = sim.world.grid.distance(hq.flagPoint, further.flagPoint);
+
+    if (nearerCost < furtherCost) {
+      expect(secondAt < 0 || firstAt < secondAt).toBe(true);
+    } else if (furtherCost < nearerCost) {
+      expect(firstAt < 0 || secondAt < firstAt).toBe(true);
+    }
+  });
+});
+
+describe('the frontier', () => {
+  it('refuses every flag on the frontier, and still allows them inside', () => {
+    const sim = newGame();
+    const hq = headquarters(sim);
+
+    const onFrontier = (point: number): boolean =>
+      DIRECTIONS.some((direction) => {
+        const neighbour = sim.world.grid.neighbour(point, direction);
+        return neighbour < 0 || sim.world.owner[neighbour] !== PLAYER;
+      });
+
+    let frontierPoints = 0;
+    let placeable = 0;
+
+    for (const point of sim.world.grid.pointsWithin(hq.point, 12)) {
+      if (sim.world.owner[point] !== PLAYER) continue;
+
+      if (onFrontier(point)) {
+        frontierPoints += 1;
+        // Nothing at all on the border: no flag, and so nothing to build.
+        expect(canPlaceFlag(sim.world, point, PLAYER)).toBe(false);
+        expect(evaluateBuildSpace(sim.world, point, PLAYER)).toBe(BuildSpace.None);
+        continue;
+      }
+
+      if (canPlaceFlag(sim.world, point, PLAYER)) placeable += 1;
+    }
+
+    // The province genuinely has a frontier, and room to build behind it.
+    expect(frontierPoints).toBeGreaterThan(0);
+    expect(placeable).toBeGreaterThan(0);
+  });
+});
+
+describe('a store that dispatches', () => {
+  it('sends its goods out in a porter’s hands', () => {
+    const sim = newGame();
+    buildAndConnect(sim, BuildingType.Sawmill);
+
+    let sawPorter = false;
+    for (let i = 0; i < 6000 && !sawPorter; i += 1) {
+      sim.update();
+      const hq = headquarters(sim);
+      const porter = sim.settlers.get(hq.worker);
+      sawPorter =
+        porter !== undefined &&
+        porter.carrying !== null &&
+        porter.state === SettlerState.DeliveringToFlag;
+    }
+
+    expect(sawPorter).toBe(true);
+  });
+
+  it('costs the province nobody to do it', () => {
+    const sim = newGame();
+    buildAndConnect(sim, BuildingType.Sawmill);
+    // Taking a porter out of the reserve must not change the head count.
+    runWatchingPopulation(sim, 6000);
+  });
+});
+
+describe('saying a building has run out', () => {
+  it('waits until it has really stopped, and says so once', () => {
+    const sim = newGame();
+    const id = buildAndConnect(sim, BuildingType.Woodcutter, MapObject.Tree)!;
+    run(sim, 3000);
+
+    const hut = sim.buildings.require(id);
+    for (const point of sim.world.grid.pointsWithin(hut.point, 8)) {
+      if (sim.world.object[point] === MapObject.Tree) sim.world.object[point] = MapObject.None;
+    }
+
+    // Nothing said while it is merely between trips.
+    run(sim, 200);
+    expect(sim.events.filter((message) => message.category === 'exhausted')).toHaveLength(0);
+
+    run(sim, 8000);
+    const exhausted = sim.events.filter((message) => message.category === 'exhausted');
+    expect(exhausted).toHaveLength(1);
+    expect(exhausted[0]!.point).toBe(hut.point);
   });
 });

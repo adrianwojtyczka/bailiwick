@@ -242,7 +242,7 @@ export const BUILDINGS: readonly BuildingInfo[] = [
     cost: [boards(2)],
     buildTicks: 220,
     worker: Profession.Forester,
-    behaviour: { kind: 'plant', object: MapObject.Tree, radius: 6, workTicks: 180 },
+    behaviour: { kind: 'plant', object: MapObject.Tree, radius: 6, workTicks: 60 },
     available: true,
     description: 'Plants saplings so the woodcutters never run dry.',
   },

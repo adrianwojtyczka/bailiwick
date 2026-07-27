@@ -90,6 +90,11 @@ export interface Building {
   output: Ware | null;
   /** Why production is stalled, for the building panel. */
   status: BuildingStatus;
+  /**
+   * Consecutive ticks spent with nothing to work on, reset the moment it finds
+   * something. Absent in saves older than version 4.
+   */
+  exhaustedFor: number;
 
   // ---- stores (headquarters and storehouses)
   /** Ware counts held here, indexed by ware id. Empty for other buildings. */

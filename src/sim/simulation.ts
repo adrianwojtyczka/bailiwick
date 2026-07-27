@@ -106,6 +106,12 @@ const SURVEY_MESSAGE_SPREAD = 3;
 const STORE_DISPATCH_LIMIT = Math.floor(FLAG_CAPACITY / 2);
 
 /**
+ * How long a building must find nothing before it says so — about a minute and
+ * a half. Short of that it is simply between trips.
+ */
+const EXHAUSTED_REPORT_TICKS = 450;
+
+/**
  * How long a worker rests indoors between trips out.
  *
  * A woodcutter who turned straight round and left again read as frantic rather
@@ -215,10 +221,11 @@ type FieldWork = Extract<
  * Bumped whenever the shape of a saved game changes.
  *
  * Version 2 added ripening fields and a geologist's survey counter; version 3
- * replaced that counter with the flag whose ground he is working. Older saves
- * still load: `fromSnapshot` fills in whatever they predate.
+ * replaced that counter with the flag whose ground he is working; version 4
+ * added how long a building has been finding nothing. Older saves still load:
+ * `fromSnapshot` fills in whatever they predate.
  */
-export const SAVE_VERSION = 3;
+export const SAVE_VERSION = 4;
 
 /** The parts of the map that play can change, and so must be saved. */
 export interface MapSnapshot {
@@ -682,6 +689,7 @@ export class Simulation {
       workTimer: 0,
       output: null,
       status: BuildingStatus.UnderConstruction,
+      exhaustedFor: 0,
       stock: isStoreType(info) ? new Array<number>(WARE_COUNT).fill(0) : [],
       reserve: 0,
     }));
@@ -864,8 +872,50 @@ export class Simulation {
     const settler = this.settlers.get(settlerId);
     if (!settler) return;
 
+    // A crate in hand is walked to a flag before he goes; `setDownAtFlag` sends
+    // him home once it is down.
+    if (this.carryCrateToNearestFlag(settler)) return;
+
     this.putDownCarriedWare(settler);
     this.sendHome(settler);
+  }
+
+  /**
+   * Sends a dismissed settler off to leave his crate at the first flag he can
+   * reach, rather than setting it down from wherever he happens to be standing.
+   *
+   * Returns false when he has nothing in hand, or when no flag is within reach
+   * — in which case the crate is put down on the spot, which is at least honest
+   * about the ware not being destroyed.
+   */
+  private carryCrateToNearestFlag(settler: Settler): boolean {
+    if (settler.carrying === null) return false;
+
+    // The end of the road he was working comes first: it is the way he came and
+    // the way anything else will leave.
+    const road = this.roads.get(settler.road);
+    const preferred = [settler.taskPoint, road?.fromFlag ?? 0, road?.toFlag ?? 0]
+      .map((flagId) => (flagId ? this.flags.get(flagId)?.point : undefined))
+      .filter((point): point is number => point !== undefined);
+
+    const nearest = this.flagPointOf(settler.point);
+    if (nearest !== undefined) preferred.push(nearest);
+
+    for (const flagPoint of preferred) {
+      const flagId = this.world.flag[flagPoint];
+      const flag = flagId ? this.flags.get(flagId) : undefined;
+      if (!flag || flag.wares.length >= FLAG_CAPACITY) continue;
+      if (!walkablePath(this.world, settler.point, flagPoint)) continue;
+
+      // He is nobody's worker now, so `setDownAtFlag` will send him home rather
+      // than back through a door.
+      settler.building = 0;
+      settler.road = 0;
+      this.carryToFlag(settler, flagPoint);
+      return true;
+    }
+
+    return false;
   }
 
   /**
@@ -1459,13 +1509,26 @@ export class Simulation {
 
   /** Sends a worker to his building's own flag with what he is carrying. */
   private walkToOwnFlag(settler: Settler, building: Building): void {
-    const path = walkablePath(this.world, settler.point, building.flagPoint);
+    this.carryToFlag(settler, building.flagPoint);
+  }
 
+  /**
+   * Sends a settler to a flag with what he is holding, wherever that flag is.
+   *
+   * A worker's own doorstep for a finished ware; the nearest flag on the way
+   * home for a carrier whose road has just been torn up from under him. Either
+   * way the crate is walked there rather than appearing on the flag from a
+   * distance.
+   */
+  private carryToFlag(settler: Settler, flagPoint: number): void {
+    const path = walkablePath(this.world, settler.point, flagPoint);
+
+    settler.taskPoint = flagPoint;
     settler.state = SettlerState.DeliveringToFlag;
     this.setPath(settler, path ?? []);
 
     if ((path?.length ?? 0) === 0) {
-      settler.point = building.flagPoint;
+      settler.point = flagPoint;
       this.setDownAtFlag(settler);
     }
   }
@@ -1479,39 +1542,47 @@ export class Simulation {
    */
   private setDownAtFlag(settler: Settler): void {
     const building = this.buildings.get(settler.building);
-    if (!building || settler.carrying === null) {
+    if (settler.carrying === null) {
       this.walkBackInside(settler, building);
       return;
     }
 
-    const flagId = this.world.flag[building.flagPoint];
+    const flagId = this.world.flag[settler.taskPoint];
     const flag = flagId ? this.flags.get(flagId) : undefined;
     if (!flag || flag.wares.length >= FLAG_CAPACITY) return; // Wait, crate in hand.
 
-    const destination = chooseDestination(
-      this.buildings,
-      this.network,
-      flag.id,
-      settler.carrying,
-      building.owner,
-      (candidate) => this.world.flag[candidate.flagPoint] ?? 0,
-    );
+    // A crate a store dispatched already knows where it is bound, and its place
+    // there is already reserved; anything else has to be routed now.
+    let bound = settler.carryDestination;
+    if (bound === 0) {
+      const destination = chooseDestination(
+        this.buildings,
+        this.network,
+        flag.id,
+        settler.carrying,
+        settler.owner,
+        (candidate) => this.world.flag[candidate.flagPoint] ?? 0,
+      );
 
-    // Nowhere to send it is no reason to stop working: it waits at the flag
-    // until a store or a consumer can be reached again.
-    const bound = destination && destination.building !== building.id ? destination.building : 0;
-    if (bound !== 0) this.reserveIncoming(bound, settler.carrying);
+      // Nowhere to send it is no reason to stop working: it waits at the flag
+      // until a store or a consumer can be reached again.
+      bound = destination && destination.building !== building?.id ? destination.building : 0;
+      if (bound !== 0) this.reserveIncoming(bound, settler.carrying);
+    }
 
     flag.wares.push({ ware: settler.carrying, destination: bound });
     settler.carrying = null;
-    building.status = BuildingStatus.Working;
+    settler.carryDestination = 0;
+    if (building) building.status = BuildingStatus.Working;
 
     this.walkBackInside(settler, building);
   }
 
   private walkBackInside(settler: Settler, building: Building | undefined): void {
     if (!building) {
-      this.dismissSettler(settler.id);
+      // Nowhere to go back to — a carrier who was only dropping off a crate on
+      // his way out of a job. He carries on home.
+      this.sendHome(settler);
       return;
     }
 
@@ -1870,7 +1941,13 @@ export class Simulation {
   // ------------------------------------------------------------- buildings
 
   private updateBuildings(): void {
-    this.buildings.forEach((building) => this.updateBuilding(building));
+    this.buildings.forEach((building) => {
+      this.updateBuilding(building);
+
+      // The run of empty ticks only counts while it is unbroken: a building
+      // that found something to do this tick starts its count again.
+      if (building.status !== BuildingStatus.Exhausted) building.exhaustedFor = 0;
+    });
   }
 
   private updateBuilding(building: Building): void {
@@ -2023,8 +2100,14 @@ export class Simulation {
    * times a second for the rest of the game.
    */
   private reportExhausted(building: Building): void {
-    if (building.status === BuildingStatus.Exhausted) return;
     building.status = BuildingStatus.Exhausted;
+    building.exhaustedFor += 1;
+
+    // Only once it has really stopped. A woodcutter sharing a forester with
+    // another dips in and out of having nothing to cut all day long, and saying
+    // so each time buried every other message; a minute and a half of finding
+    // nothing at all is a different matter.
+    if (building.exhaustedFor !== EXHAUSTED_REPORT_TICKS) return;
 
     const info = buildingInfo(building.type);
     this.note(
@@ -2050,10 +2133,7 @@ export class Simulation {
       case 'farm':
         return (
           this.findObject(centre, behaviour.radius, MapObject.Field) ??
-          // A field may sit on the edge of the good ground rather than dead in
-          // the middle of it. Insisting on six sides of meadow left a farm with
-          // nowhere at all to sow inside its own small patch.
-          this.findGrowingSpot(centre, behaviour.radius, 'farmable', 4)
+          this.findGrowingSpot(centre, behaviour.radius, 'farmable', true)
         );
       case 'plant':
         return this.findGrowingSpot(centre, behaviour.radius, 'plantable');
@@ -2269,11 +2349,51 @@ export class Simulation {
       const target = this.buildings.get(destination.building);
       if (!target || outstandingDemand(target, ware) <= 0) continue;
 
+      // Somebody has to carry it out, and only once there is genuinely
+      // something to carry — a store with nothing to send needs no porter. He
+      // is free again only when he is back inside, which is what paces a
+      // store's dispatching.
+      const porter = this.storePorter(building);
+      if (!porter) return;
+
       building.stock[ware] = building.stock[ware]! - 1;
       this.reserveIncoming(destination.building, ware);
-      flag.wares.push({ ware, destination: destination.building });
+
+      // He carries it out already knowing where it is bound, so `setDownAtFlag`
+      // leaves the choice — and its reservation — exactly as made here.
+      porter.carrying = ware;
+      porter.carryDestination = destination.building;
+      porter.taskTimer = 0;
+      this.walkToOwnFlag(porter, building);
       return;
     }
+  }
+
+  /**
+   * The settler who fetches and carries at a store, ready for another crate.
+   *
+   * A store has never had a worker of its own, so it takes one from the people
+   * waiting inside it the first time it has something to send. Nothing is spent
+   * doing so: `population` counts a settler on the books and one in the reserve
+   * alike, so the province is no smaller for it.
+   */
+  private storePorter(building: Building): Settler | undefined {
+    const existing = this.settlers.get(building.worker);
+    if (existing) {
+      // Ready the moment he is back inside. The rest `depositAtHome` gives him
+      // is for a trade that has been out in the field, not for a man walking to
+      // his own doorstep and back.
+      return existing.state === SettlerState.AtWork ? existing : undefined;
+    }
+
+    if (building.reserve <= 0) return undefined;
+
+    building.reserve -= 1;
+    const porter = this.createSettler(building.owner, Profession.Helper, building.point);
+    porter.building = building.id;
+    porter.state = SettlerState.AtWork;
+    building.worker = porter.id;
+    return porter;
   }
 
   /** Records that a ware is on its way, so nobody orders it twice. */
@@ -2615,15 +2735,13 @@ export class Simulation {
     centre: number,
     radius: number,
     property: 'plantable' | 'farmable',
-    needed = 6,
+    clearAround = false,
   ): number | undefined {
     const suitable: number[] = [];
 
     for (const point of this.world.grid.pointsWithin(centre, radius)) {
       if (point === centre) continue;
-      if (this.world.object[point] !== MapObject.None) continue;
-      if (this.world.building[point] !== 0 || this.world.flag[point] !== 0) continue;
-      if (this.world.roadCount(point) > 0) continue;
+      if (!this.isClearGround(point)) continue;
 
       this.world.trianglesAroundPoint(point, TRIANGLE_SCRATCH);
       let usable = 0;
@@ -2632,10 +2750,41 @@ export class Simulation {
         if (triangle === OUT_OF_BOUNDS) continue;
         if (this.world.propertiesOfTriangle(triangle)[property]) usable += 1;
       }
-      if (usable >= needed) suitable.push(point);
+      if (usable < 6) continue;
+
+      // A field needs elbow room: corn will not be sown against a tree, an
+      // outcrop, a road, or another field.
+      if (clearAround && !this.hasClearNeighbours(point)) continue;
+
+      suitable.push(point);
     }
 
     return this.rng.pick(suitable);
+  }
+
+  /** Bare ground with nothing standing on it and no road across it. */
+  private isClearGround(point: number): boolean {
+    if (this.world.object[point] !== MapObject.None) return false;
+    if (this.world.building[point] !== 0 || this.world.flag[point] !== 0) return false;
+    return this.world.roadCount(point) === 0;
+  }
+
+  /**
+   * Whether nothing is growing or standing on any of the six points around this
+   * one — no tree, no outcrop, and above all no other field.
+   *
+   * Deliberately about what is *on* the ground rather than what has been built
+   * across it. A farm's own walls and flag are neighbours of everything within
+   * its reach, so counting those would leave it nowhere at all to sow; a field
+   * running up to the farmyard or alongside a track is exactly right.
+   */
+  private hasClearNeighbours(point: number): boolean {
+    for (const direction of DIRECTIONS) {
+      const neighbour = this.world.grid.neighbour(point, direction);
+      if (neighbour === OUT_OF_BOUNDS) return false;
+      if (this.world.object[neighbour] !== MapObject.None) return false;
+    }
+    return true;
   }
 
   private growTrees(): void {
@@ -2752,7 +2901,10 @@ export class Simulation {
 
     simulation.flags.adopt(snapshot.flags.pool, snapshot.flags.items);
     simulation.roads.adopt(snapshot.roads.pool, snapshot.roads.items);
-    simulation.buildings.adopt(snapshot.buildings.pool, snapshot.buildings.items);
+    simulation.buildings.adopt(
+      snapshot.buildings.pool,
+      snapshot.buildings.items.map((b) => ({ ...b, exhaustedFor: b.exhaustedFor ?? 0 })),
+    );
     // Version 1 settlers have no survey counter; nobody in such a save is a
     // geologist, so nought is not merely a safe default but the right one.
     simulation.settlers.adopt(

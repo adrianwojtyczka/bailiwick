@@ -74,9 +74,14 @@ function isWellInsideTerritory(world: World, point: number, player: number): boo
  * Whether a flag may be raised here. Flags may not touch one another — the gap
  * between them is what gives a road network its segments, each worked by one
  * carrier.
+ *
+ * Nothing may be put on the frontier itself, flags included. A flag on the
+ * border is a road built on ground that is only half yours, and it let a player
+ * creep outwards without ever claiming anything; expanding now means taking the
+ * ground first.
  */
 export function canPlaceFlag(world: World, point: number, player: number): boolean {
-  if (world.owner[point] !== player) return false;
+  if (!isWellInsideTerritory(world, point, player)) return false;
   if (!isPointClear(world, point)) return false;
   if (!world.isWalkable(point)) return false;
 
@@ -139,20 +144,19 @@ export function evaluateBuildSpace(world: World, point: number, player: number):
   if (!world.isWalkable(point)) return BuildSpace.None;
   if (world.owner[point] !== player) return BuildSpace.None;
 
-  // A lone flag is allowed right up to the border; buildings are not.
+  // `canPlaceFlag` now keeps the frontier clear too, so a point on the border
+  // offers nothing at all.
   const flagPossible = canPlaceFlag(world, point, player);
+  if (!flagPossible) return BuildSpace.None;
 
   // A road already runs through here. A flag is still welcome — it divides the
   // road in two — but a building would leave carriers walking through its walls.
-  if (world.roadCount(point) > 0) return flagPossible ? BuildSpace.Flag : BuildSpace.None;
-  if (!isWellInsideTerritory(world, point, player)) {
-    return flagPossible ? BuildSpace.Flag : BuildSpace.None;
-  }
+  if (world.roadCount(point) > 0) return BuildSpace.Flag;
 
   for (const direction of DIRECTIONS) {
     const neighbour = world.grid.neighbour(point, direction);
     if (neighbour === OUT_OF_BOUNDS) continue;
-    if (world.building[neighbour] !== 0) return flagPossible ? BuildSpace.Flag : BuildSpace.None;
+    if (world.building[neighbour] !== 0) return BuildSpace.Flag;
   }
 
   // A building needs its own flag on the point to the south-east.
@@ -162,7 +166,7 @@ export function evaluateBuildSpace(world: World, point: number, player: number):
     (world.flag[flagPoint] !== 0
       ? world.owner[flagPoint] === player
       : canPlaceFlag(world, flagPoint, player));
-  if (!flagUsable) return flagPossible ? BuildSpace.Flag : BuildSpace.None;
+  if (!flagUsable) return BuildSpace.Flag;
 
   world.trianglesAroundPoint(point, AROUND_TRIANGLES);
 
@@ -181,13 +185,13 @@ export function evaluateBuildSpace(world: World, point: number, player: number):
   }
 
   if (allMineable) return BuildSpace.Mine;
-  if (!allBuildable) return flagPossible ? BuildSpace.Flag : BuildSpace.None;
+  if (!allBuildable) return BuildSpace.Flag;
 
   const slope = world.maxSlopeAround(point);
   if (slope <= SLOPE_LIMIT.castle) return BuildSpace.Castle;
   if (slope <= SLOPE_LIMIT.house) return BuildSpace.House;
   if (slope <= SLOPE_LIMIT.hut) return BuildSpace.Hut;
-  return flagPossible ? BuildSpace.Flag : BuildSpace.None;
+  return BuildSpace.Flag;
 }
 
 /** Whether a footprint fits in the space a point offers. */

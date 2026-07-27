@@ -252,6 +252,18 @@ function generateObjects(world: World, seed: number): void {
 /** How far inside a range the rock must be before it carries ore. */
 const BARREN_MOUNTAIN_RIM = 2;
 
+/** How far from sand, rock, snow or lava groundwater has to be. */
+const WATER_DRY_MARGIN = 2;
+
+/** Terrain that rules out groundwater, for itself and for its neighbourhood. */
+const DRY_TERRAIN: ReadonlySet<Terrain> = new Set([
+  Terrain.Desert,
+  Terrain.Mountain,
+  Terrain.MountainMeadow,
+  Terrain.Snow,
+  Terrain.Lava,
+]);
+
 /**
  * Marks the rock that lies well inside a range.
  *
@@ -287,10 +299,59 @@ function findDeepRock(world: World): Uint8Array {
   return deep;
 }
 
+/**
+ * Ground that could hold groundwater: soft country, well clear of anywhere dry
+ * or stony.
+ *
+ * Water used to go wherever four sides were buildable, which put wells in the
+ * middle of the desert and hard against mountain walls. It now wants grass on
+ * every side and no sand, rock, snow or lava for two nodes in any direction.
+ */
+function findWetGround(world: World): Uint8Array {
+  const { grid } = world;
+
+  const soft = new Uint8Array(grid.size);
+  for (let index = 0; index < grid.size; index += 1) {
+    world.trianglesAroundPoint(index, SCRATCH);
+
+    let grass = 0;
+    let dry = false;
+    for (let i = 0; i < 6; i += 1) {
+      const triangle = SCRATCH[i]!;
+      if (triangle === OUT_OF_BOUNDS) {
+        dry = true;
+        break;
+      }
+      const terrain = world.terrainOfTriangle(triangle);
+      if (terrain === Terrain.Meadow || terrain === Terrain.Steppe) grass += 1;
+      if (DRY_TERRAIN.has(terrain as Terrain)) dry = true;
+    }
+
+    if (!dry && grass === 6) soft[index] = 1;
+  }
+
+  const wet = new Uint8Array(grid.size);
+  for (let index = 0; index < grid.size; index += 1) {
+    if (!soft[index]) continue;
+
+    let clear = true;
+    for (const near of grid.pointsWithin(index, WATER_DRY_MARGIN)) {
+      if (!soft[near]) {
+        clear = false;
+        break;
+      }
+    }
+    if (clear) wet[index] = 1;
+  }
+
+  return wet;
+}
+
 function generateResources(world: World, seed: number): void {
   const { grid } = world;
   const rng = new Rng(seed ^ 0x2f8a17c5);
   const deepRock = findDeepRock(world);
+  const wetGround = findWetGround(world);
 
   for (let index = 0; index < grid.size; index += 1) {
     const around = surroundings(world, index);
@@ -324,9 +385,9 @@ function generateResources(world: World, seed: number): void {
       continue;
     }
 
-    if (around.buildable >= 4) {
-      // Groundwater almost everywhere, so wells are a matter of placement
-      // rather than luck — but drier ground yields less.
+    if (wetGround[index]) {
+      // Groundwater under any decent stretch of grass, so a well is a matter of
+      // placement rather than luck — but drier country yields less.
       const wetness = fractalNoise(seed ^ 0x4b7d2e91, grid.worldX(index), grid.worldY(index), 3, 0.04);
       world.resource[index] = Resource.Water;
       world.resourceAmount[index] = wetness > 0.35 ? 10 : 4;

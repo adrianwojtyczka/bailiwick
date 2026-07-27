@@ -48,10 +48,12 @@ describe('evaluateBuildSpace', () => {
     expect(evaluateBuildSpace(world, centre, 2)).toBe(BuildSpace.None);
   });
 
-  it('allows only a flag on the border of the territory', () => {
-    // Taking one neighbour away makes this point a border point.
+  it('offers nothing at all on the border of the territory', () => {
+    // Taking one neighbour away makes this point a border point. Not even a
+    // flag belongs there: ground has to be claimed before it is built on.
     world.owner[world.grid.neighbour(centre, Direction.NorthEast)] = 0;
-    expect(evaluateBuildSpace(world, centre, PLAYER)).toBe(BuildSpace.Flag);
+    expect(evaluateBuildSpace(world, centre, PLAYER)).toBe(BuildSpace.None);
+    expect(canPlaceFlag(world, centre, PLAYER)).toBe(false);
   });
 
   it('refuses a point occupied by a tree or stone', () => {

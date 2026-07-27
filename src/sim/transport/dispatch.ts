@@ -98,13 +98,57 @@ export interface Destination {
   readonly flag: number;
 }
 
+/** How much of a ware a building is holding or has coming, for sharing out. */
+function heldOf(building: Building, ware: Ware): number {
+  const behaviour = buildingInfo(building.type).behaviour;
+
+  if (building.state === BuildingState.UnderConstruction) {
+    const cost = buildingInfo(building.type).cost;
+    let held = 0;
+    for (let i = 0; i < cost.length; i += 1) {
+      if (cost[i]!.ware !== ware) continue;
+      held += building.delivered[i]! + building.incoming[i]!;
+    }
+    return held;
+  }
+
+  if (behaviour.kind === 'craft') {
+    let held = 0;
+    for (let i = 0; i < behaviour.inputs.length; i += 1) {
+      if (behaviour.inputs[i]!.ware !== ware) continue;
+      held += building.inputs[i]! + building.inputsIncoming[i]!;
+    }
+    return held;
+  }
+
+  if (behaviour.kind === 'extract' && behaviour.food?.includes(ware)) {
+    let held = 0;
+    for (let i = 0; i < building.inputs.length; i += 1) {
+      held += building.inputs[i]! + building.inputsIncoming[i]!;
+    }
+    return held;
+  }
+
+  return 0;
+}
+
 /**
  * Picks where a newly produced ware should go.
  *
- * A building that actually needs the ware always wins over a warehouse, and
- * among equals the cheapest journey wins — which is what makes a sawmill built
- * next to the woodcutter feel immediately worthwhile. Ties break on the lower
- * building id so the choice never depends on iteration order.
+ * A building that actually needs the ware always wins over a warehouse. Among
+ * those that want it, **trades share and rivals of a trade do not**: the kind of
+ * building holding least of it goes first, and only then does distance decide,
+ * between buildings of that same kind.
+ *
+ * So an armoury and a smelter halve the coal between them however far apart
+ * they are, and the four kinds of mine share the bread — while two sawmills, of
+ * one kind, still send every log to whichever is nearer, which is what makes
+ * building a mill beside the woodcutter worthwhile.
+ *
+ * The comparison is made on what each trade actually holds, counting what is
+ * already on its way, so it needs no memory of what was sent last and stays a
+ * pure function of the world. Ties break on the lower type and then the lower
+ * building id, so the choice never depends on iteration order.
  */
 export function chooseDestination(
   buildings: EntityTable<Building>,
@@ -116,8 +160,12 @@ export function chooseDestination(
 ): Destination | undefined {
   const costs = network.costsFrom(sourceFlag);
 
-  let bestConsumer: Destination | undefined;
-  let bestConsumerCost = Number.POSITIVE_INFINITY;
+  // Per building type: how much that trade holds, and its cheapest claimant.
+  const trades = new Map<
+    number,
+    { held: number; cost: number; destination: Destination }
+  >();
+
   let bestStore: Destination | undefined;
   let bestStoreCost = Number.POSITIVE_INFINITY;
 
@@ -131,9 +179,21 @@ export function chooseDestination(
     if (cost === undefined) return;
 
     if (outstandingDemand(building, ware) > 0) {
-      if (cost < bestConsumerCost) {
-        bestConsumerCost = cost;
-        bestConsumer = { building: building.id, flag };
+      const destination: Destination = { building: building.id, flag };
+      const held = heldOf(building, ware);
+      const trade = trades.get(building.type);
+
+      if (!trade) {
+        trades.set(building.type, { held, cost, destination });
+        return;
+      }
+
+      // The trade's total tells us whether it is behind; the nearest of its
+      // buildings is the one that will actually receive.
+      trade.held += held;
+      if (cost < trade.cost) {
+        trade.cost = cost;
+        trade.destination = destination;
       }
       return;
     }
@@ -144,5 +204,17 @@ export function chooseDestination(
     }
   });
 
-  return bestConsumer ?? bestStore;
+  let chosen: Destination | undefined;
+  let leastHeld = Number.POSITIVE_INFINITY;
+  let chosenType = Number.POSITIVE_INFINITY;
+
+  for (const [type, trade] of trades) {
+    if (trade.held < leastHeld || (trade.held === leastHeld && type < chosenType)) {
+      leastHeld = trade.held;
+      chosenType = type;
+      chosen = trade.destination;
+    }
+  }
+
+  return chosen ?? bestStore;
 }
