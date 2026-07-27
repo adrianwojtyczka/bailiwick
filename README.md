@@ -85,15 +85,17 @@ keeps the download to a single script and makes offline play immediate.
 
 ## What is in, and what is next
 
-Playable now: the road and carrier network, construction sites and their
-material deliveries, settlers taking up trades, saving and export, and these
-chains —
+Playable now: the road and carrier network, construction sites that rise as
+their materials arrive, settlers taking up trades, a population that grows as
+the province does, saving and export, and these chains —
 
 - **Wood and stone** — woodcutters, foresters, sawmills, quarries.
 - **Food** — wells, fisheries, farms sowing and reaping their own fields,
   mills, bakeries, pig farms, slaughterhouses, breweries, donkey breeders.
-- **Mining** — geologists who go out and survey the rock, and the coal, iron,
-  gold and granite mines sunk on what they find. Miners must be fed.
+- **Mining** — geologists who go out and survey the rock, marking the one spot
+  they struck, and the coal, iron, gold and granite mines sunk on what they
+  find. Ore lies well inside a range, so the mountains have to be entered
+  properly. Miners must be fed.
 - **Metal and tools** — iron smelters, mints, armouries, and a metalworks that
   makes whichever tool the player is shortest of.
 - **Territory** — outposts from a barracks to a fortress, each claiming the

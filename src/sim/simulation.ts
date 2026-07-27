@@ -53,8 +53,14 @@ const HEADQUARTERS_RADIUS = 9;
 /** Saplings advance one growth stage every this many ticks. */
 const TREE_GROWTH_INTERVAL = 260;
 
-/** Corn advances one growth stage every this many ticks. */
-const FIELD_GROWTH_INTERVAL = 150;
+/**
+ * Corn advances one growth stage every this many ticks.
+ *
+ * Four times slower than it first was: a farm that turned its fields over
+ * every few seconds made grain far too cheap for a crop that feeds the mills,
+ * bakeries, breweries and stockyards downstream of it.
+ */
+const FIELD_GROWTH_INTERVAL = 600;
 
 /** How far from its shaft a mine can work the seam. */
 const SEAM_RADIUS = 2;
@@ -63,13 +69,19 @@ const SEAM_RADIUS = 2;
 const GEOLOGIST_SURVEYS = 3;
 
 /** How far from his flag, and from each stop, a geologist will wander. */
-const GEOLOGIST_RANGE = 8;
+const GEOLOGIST_RANGE = 6;
 
-/** How far around a strike the ground becomes known. */
-const GEOLOGIST_REVEAL = 2;
+/**
+ * Ticks spent hammering at one outcrop.
+ *
+ * Kept short on purpose. At two minutes of game time this looked for all the
+ * world like a settler who had hung: he stood stock still, and the find was
+ * announced only once he had finished. Six seconds reads as work.
+ */
+const GEOLOGIST_WORK_TICKS = 30;
 
-/** Ticks spent hammering at one outcrop. */
-const GEOLOGIST_WORK_TICKS = 120;
+/** How many spots a geologist will try before giving one up as unreachable. */
+const GEOLOGIST_TRIES = 8;
 
 /** How often stranded wares are given a new destination. */
 const STRANDED_SWEEP_INTERVAL = 40;
@@ -104,6 +116,12 @@ const STARTING_STOCK: readonly { ware: Ware; count: number }[] = [
 ];
 
 const STARTING_SETTLERS = 32;
+
+/** How often a new settler turns up at the headquarters. */
+const POPULATION_INTERVAL = 600;
+
+/** How many more people each finished building lets a province support. */
+const SETTLERS_PER_BUILDING = 3;
 
 export interface PlayerConfig {
   readonly name: string;
@@ -379,7 +397,7 @@ export class Simulation {
     if (flag.owner !== player) return fail('That flag is not yours.');
 
     if (this.surveyTarget(point) === undefined) {
-      return fail('There is no rock within reach of that flag.');
+      return fail('There is nothing left to survey within reach of that flag.');
     }
 
     const tool = professionInfo(Profession.Geologist).tool;
@@ -413,8 +431,37 @@ export class Simulation {
     this.updateRoads();
     this.growTrees();
     this.growFields();
+    this.growPopulation();
 
     if (this.tick % STRANDED_SWEEP_INTERVAL === 0) this.retargetStrandedWares();
+  }
+
+  /**
+   * New settlers arrive at the headquarters as time passes.
+   *
+   * The cap rises with the buildings a player has finished, so a province that
+   * has actually been developed supports more people — and a long game cannot
+   * quietly breed settlers without limit while nothing else changes.
+   */
+  private growPopulation(): void {
+    if (this.tick % POPULATION_INTERVAL !== 0) return;
+
+    for (const player of this.players) {
+      const home = this.buildings.get(player.headquarters);
+      if (!home || home.state !== BuildingState.Complete) continue;
+
+      let finished = 0;
+      this.buildings.forEach((building) => {
+        if (building.owner === player.id && building.state === BuildingState.Complete) {
+          finished += 1;
+        }
+      });
+
+      const cap = STARTING_SETTLERS + finished * SETTLERS_PER_BUILDING;
+      if (this.population(player.id) >= cap) continue;
+
+      home.reserve += 1;
+    }
   }
 
   // ------------------------------------------------------- entity helpers
@@ -864,7 +911,53 @@ export class Simulation {
   private setPath(settler: Settler, path: number[]): void {
     settler.path = path;
     settler.pathIndex = 0;
-    if (path.length > 0) this.beginStep(settler);
+
+    if (path.length > 0) {
+      this.beginStep(settler);
+      return;
+    }
+
+    // No path means standing still, so any step left half-taken is settled
+    // rather than left on the books — otherwise the settler goes on being
+    // drawn between two points he is no longer walking between.
+    settler.fromPoint = settler.point;
+    settler.toPoint = settler.point;
+    settler.stepProgress = 0;
+  }
+
+  /** True while the settler is between two points rather than standing on one. */
+  private midStep(settler: Settler): boolean {
+    return settler.stepProgress > 0 && settler.toPoint !== settler.point;
+  }
+
+  /**
+   * Where a settler will be standing once the step under way has finished.
+   *
+   * `point` only advances when a step completes, so it is the point *behind* a
+   * walking settler. Anything routing him somewhere new has to start from here
+   * instead, or the route begins with a step he has already taken.
+   */
+  private committedPoint(settler: Settler): number {
+    return this.midStep(settler) ? settler.toPoint : settler.point;
+  }
+
+  /**
+   * Sends a settler somewhere new without jerking him backwards.
+   *
+   * `setPath` restarts the current step from `point`, which is fine for a
+   * settler standing still and wrong for one in mid-stride: he would snap back
+   * to the point he had just left and walk it again. Keeping the step in flight
+   * and queueing the new route behind it lets him finish the pace he is already
+   * taking and turn from there.
+   */
+  private redirect(settler: Settler, path: number[]): void {
+    if (!this.midStep(settler)) {
+      this.setPath(settler, path);
+      return;
+    }
+
+    settler.path = [settler.toPoint, ...path];
+    settler.pathIndex = 0;
   }
 
   /** Advances one settler along its path. Returns true when it has arrived. */
@@ -1054,7 +1147,8 @@ export class Simulation {
    * teach the player nothing.
    */
   private surveyTarget(from: number): number | undefined {
-    const candidates: number[] = [];
+    const rocky: number[] = [];
+    const ground: number[] = [];
 
     for (const point of this.world.grid.pointsWithin(from, GEOLOGIST_RANGE)) {
       if (this.world.resourceKnown[point]) continue;
@@ -1063,15 +1157,39 @@ export class Simulation {
 
       this.world.trianglesAroundPoint(point, TRIANGLE_SCRATCH);
       let rock = 0;
+      let soil = 0;
       for (let t = 0; t < 6; t += 1) {
         const triangle = TRIANGLE_SCRATCH[t]!;
         if (triangle === OUT_OF_BOUNDS) continue;
-        if (this.world.propertiesOfTriangle(triangle).mineable) rock += 1;
+        const properties = this.world.propertiesOfTriangle(triangle);
+        if (properties.mineable) rock += 1;
+        if (properties.buildable) soil += 1;
       }
-      if (rock >= 4) candidates.push(point);
+
+      if (rock >= 4) rocky.push(point);
+      else if (soil >= 4) ground.push(point);
     }
 
-    return this.rng.pick(candidates);
+    // Rock first, since ore is what a geologist is usually wanted for; sent
+    // into farmland with no rock in reach he prospects for water instead, which
+    // is what tells the player where a well will actually draw.
+    const candidates = rocky.length > 0 ? rocky : ground;
+
+    // A spot is no use if he cannot get to it. `walkablePath` refuses any step
+    // steeper than a road may climb, so a great deal of visible mountain is not
+    // actually reachable on foot; picking blind meant giving up the whole trip
+    // on the first bad draw.
+    for (let tries = 0; tries < GEOLOGIST_TRIES && candidates.length > 0; tries += 1) {
+      const index = this.rng.nextInt(candidates.length);
+      const point = candidates[index]!;
+      if (walkablePath(this.world, from, point)) return point;
+
+      // Swap-remove, so each try costs one path search and no repeats.
+      candidates[index] = candidates[candidates.length - 1]!;
+      candidates.pop();
+    }
+
+    return undefined;
   }
 
   /** Points the geologist at his next outcrop, or sends him home. */
@@ -1099,16 +1217,14 @@ export class Simulation {
   }
 
   /**
-   * He has finished digging. Whatever the rock holds becomes visible for a
-   * little way around, since an ore body runs in a band rather than sitting in
-   * a single spot.
+   * He has finished digging. Only the spot he actually struck becomes known —
+   * a geologist reports the hole he dug, not the hillside around it, so
+   * mapping a seam takes several trips.
    */
   private completeSurvey(settler: Settler): void {
     const found = this.world.resource[settler.taskPoint] as Resource;
 
-    for (const point of this.world.grid.pointsWithin(settler.taskPoint, GEOLOGIST_REVEAL)) {
-      this.world.resourceKnown[point] = 1;
-    }
+    this.world.resourceKnown[settler.taskPoint] = 1;
 
     if (found !== Resource.None && this.world.resourceAmount[settler.taskPoint]! > 0) {
       this.note(`A geologist finds ${RESOURCE_NAMES[found]}.`);
@@ -1205,13 +1321,43 @@ export class Simulation {
       return;
     }
 
-    if (!this.hasAllMaterials(building)) return;
+    const info = buildingInfo(building.type);
+
+    // The builder works with what has turned up rather than waiting for the
+    // whole delivery, so a site visibly rises as its materials arrive.
+    if (building.buildProgress >= this.progressAllowedBy(building)) return;
 
     building.buildProgress += 1;
-    if (building.buildProgress < buildingInfo(building.type).buildTicks) return;
+    if (building.buildProgress < info.buildTicks || !this.hasAllMaterials(building)) return;
 
     this.completeConstruction(building);
     this.sendHome(settler);
+  }
+
+  /**
+   * How far the work can get on the materials delivered so far.
+   *
+   * The cost list is read in order and stops at the first material that has not
+   * all arrived, so the boards are laid before any stone is touched — a frame
+   * goes up before it is clad, and a half-delivered pile of stone buys nothing
+   * until the timber is complete.
+   */
+  private progressAllowedBy(building: Building): number {
+    const cost = buildingInfo(building.type).cost;
+    if (cost.length === 0) return buildingInfo(building.type).buildTicks;
+
+    let required = 0;
+    for (const item of cost) required += item.count;
+    if (required === 0) return buildingInfo(building.type).buildTicks;
+
+    let usable = 0;
+    for (let i = 0; i < cost.length; i += 1) {
+      const delivered = Math.min(building.delivered[i]!, cost[i]!.count);
+      usable += delivered;
+      if (delivered < cost[i]!.count) break;
+    }
+
+    return Math.floor((buildingInfo(building.type).buildTicks * usable) / required);
   }
 
   // -------------------------------------------------------------- carriers
@@ -1235,7 +1381,10 @@ export class Simulation {
       return true;
     }
 
-    const position = road.points.indexOf(settler.point);
+    // A carrier strolling back to his post may be picked off mid-stride, so
+    // every decision here is made from where he will be, not where he was.
+    const from = this.committedPoint(settler);
+    const position = road.points.indexOf(from);
     const nearerToStart = position >= 0 && position * 2 <= road.points.length;
 
     const ends = nearerToStart
@@ -1255,13 +1404,13 @@ export class Simulation {
       const index = flag.wares.findIndex((parcel) => this.nextFlagFor(here, parcel) === there);
       if (index < 0) continue;
 
-      const path = this.pathAlongRoad(road, settler.point, flag.point);
+      const path = this.pathAlongRoad(road, from, flag.point);
       if (!path) continue;
 
       settler.state = SettlerState.CarrierCollecting;
       settler.taskPoint = here;
-      this.setPath(settler, path);
-      if (path.length === 0) this.collectWare(settler);
+      this.redirect(settler, path);
+      if (settler.path.length === 0) this.collectWare(settler);
       return true;
     }
 
@@ -1287,10 +1436,11 @@ export class Simulation {
     const road = this.roads.get(settler.road);
     if (!road) return;
 
+    const from = this.committedPoint(settler);
     const post = road.points[Math.floor(road.points.length / 2)]!;
-    if (settler.point === post) return;
+    if (from === post) return;
 
-    this.setPath(settler, this.pathAlongRoad(road, settler.point, post) ?? []);
+    this.redirect(settler, this.pathAlongRoad(road, from, post) ?? []);
   }
 
   private collectWare(settler: Settler): void {
@@ -1579,7 +1729,10 @@ export class Simulation {
       case 'farm':
         return (
           this.findObject(centre, behaviour.radius, MapObject.Field) ??
-          this.findGrowingSpot(centre, behaviour.radius, 'farmable')
+          // A field may sit on the edge of the good ground rather than dead in
+          // the middle of it. Insisting on six sides of meadow left a farm with
+          // nowhere at all to sow inside its own small patch.
+          this.findGrowingSpot(centre, behaviour.radius, 'farmable', 4)
         );
       case 'plant':
         return this.findGrowingSpot(centre, behaviour.radius, 'plantable');
@@ -1721,13 +1874,19 @@ export class Simulation {
       building.owner,
       (candidate) => this.world.flag[candidate.flagPoint] ?? 0,
     );
-    if (!destination) return false;
 
     // A ware destined for the very building it came from would loop forever.
-    if (destination.building === building.id) return false;
+    const bound = destination && destination.building !== building.id ? destination.building : 0;
 
-    this.reserveIncoming(destination.building, building.output);
-    flag.wares.push({ ware: building.output, destination: destination.building });
+    // Nowhere to send it does not mean nowhere to put it. A woodcutter whose
+    // road has been torn up goes on working and stacks its logs against its own
+    // flag, exactly as it would in the original; the pile is what tells the
+    // player the connection is broken. `retargetStrandedWares` finds these
+    // parcels a home the moment a store or a consumer is reachable again, and
+    // until then no carrier touches them, since `nextFlagFor` cannot route a
+    // parcel bound for nowhere.
+    if (bound !== 0) this.reserveIncoming(bound, building.output);
+    flag.wares.push({ ware: building.output, destination: bound });
     building.output = null;
     building.status = BuildingStatus.Working;
     return true;
@@ -2104,6 +2263,7 @@ export class Simulation {
     centre: number,
     radius: number,
     property: 'plantable' | 'farmable',
+    needed = 6,
   ): number | undefined {
     const suitable: number[] = [];
 
@@ -2114,15 +2274,13 @@ export class Simulation {
       if (this.world.roadCount(point) > 0) continue;
 
       this.world.trianglesAroundPoint(point, TRIANGLE_SCRATCH);
-      let usable = true;
+      let usable = 0;
       for (let t = 0; t < 6; t += 1) {
         const triangle = TRIANGLE_SCRATCH[t]!;
-        if (triangle === OUT_OF_BOUNDS || !this.world.propertiesOfTriangle(triangle)[property]) {
-          usable = false;
-          break;
-        }
+        if (triangle === OUT_OF_BOUNDS) continue;
+        if (this.world.propertiesOfTriangle(triangle)[property]) usable += 1;
       }
-      if (usable) suitable.push(point);
+      if (usable >= needed) suitable.push(point);
     }
 
     return this.rng.pick(suitable);

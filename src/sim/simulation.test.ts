@@ -85,6 +85,26 @@ function run(sim: Simulation, ticks: number): void {
   for (let i = 0; i < ticks; i += 1) sim.update();
 }
 
+/**
+ * Runs the game while watching that nobody is lost or counted twice.
+ *
+ * The population may rise — settlers arrive over time — but it must never fall,
+ * and it must never jump by more than the one man who can arrive on any tick.
+ * A settler credited to a store while still walking would show up as a rise
+ * and then a fall; one removed without being credited, as a fall alone.
+ */
+function runWatchingPopulation(sim: Simulation, ticks: number): void {
+  let previous = sim.population(PLAYER);
+
+  for (let i = 0; i < ticks; i += 1) {
+    sim.update();
+    const now = sim.population(PLAYER);
+    expect(now - previous).toBeGreaterThanOrEqual(0);
+    expect(now - previous).toBeLessThanOrEqual(1);
+    previous = now;
+  }
+}
+
 describe('a new game', () => {
   it('gives the player a stocked headquarters', () => {
     const sim = newGame();
@@ -335,7 +355,7 @@ describe('determinism', () => {
     // deliberately, never reflexively.
     const sim = newGame(4242);
     run(sim, 1000);
-    expect(sim.hash()).toMatchInlineSnapshot(`"f73534e2"`);
+    expect(sim.hash()).toMatchInlineSnapshot(`"de241a8d"`);
   });
 });
 
@@ -811,13 +831,9 @@ describe('walking home again', () => {
     // Crediting the store on setting off would show a man in two places; only
     // crediting him on arrival, but removing him early, would lose him.
     const sim = newGame();
-    const before = sim.population(PLAYER);
 
     const id = buildAndConnect(sim, BuildingType.Woodcutter, MapObject.Tree)!;
-    for (let i = 0; i < 1200; i += 1) {
-      sim.update();
-      expect(sim.population(PLAYER)).toBe(before);
-    }
+    runWatchingPopulation(sim, 1200);
 
     expect(sim.buildings.require(id).state).toBe(BuildingState.Complete);
   });
@@ -831,12 +847,13 @@ describe('walking home again', () => {
     run(sim, 400);
 
     expect(sim.settlers.all().some((s) => s.state === SettlerState.ReturningToStore)).toBe(false);
-    expect(hq.reserve).toBe(reserveOnFinishing + 1);
+    // He is back in the store. New settlers arrive over time too, so the count
+    // may have risen further; what matters is that he was added, not lost.
+    expect(hq.reserve).toBeGreaterThan(reserveOnFinishing);
   });
 
   it('gets the builder home even when his road is torn up under him', () => {
     const sim = newGame();
-    const before = sim.population(PLAYER);
     buildUntilComplete(sim);
 
     const walker = sim.settlers.all().find((s) => s.state === SettlerState.ReturningToStore)!;
@@ -845,10 +862,9 @@ describe('walking home again', () => {
     const road = sim.roads.all()[0]!;
     expect(sim.demolishRoad(PLAYER, road.points[1]!).ok).toBe(true);
 
-    run(sim, 600);
+    runWatchingPopulation(sim, 600);
 
     expect(sim.settlers.has(walker.id)).toBe(false);
-    expect(sim.population(PLAYER)).toBe(before);
   });
 });
 
@@ -944,10 +960,41 @@ describe('a carrier with nothing to carry', () => {
 });
 
 describe('the farm', () => {
-  /** Places a farm on flat meadow near the headquarters and connects it. */
+  /**
+   * Places a farm on ground that can actually grow corn.
+   *
+   * A farm only sows within two nodes of itself, so it has to stand on meadow
+   * to be any use at all — put one in the desert and it reports itself
+   * exhausted, which is correct but makes for a poor test of farming.
+   */
   function buildFarm(sim: Simulation): number | undefined {
-    const id = buildAndConnect(sim, BuildingType.Farm);
-    return id;
+    const hq = headquarters(sim);
+    const info = buildingInfo(BuildingType.Farm);
+
+    let best: number | undefined;
+    let bestSoil = 0;
+
+    for (const point of sim.world.grid.pointsWithin(hq.point, 9)) {
+      if (sim.world.grid.distance(hq.point, point) < 3) continue;
+      const space = evaluateBuildSpace(sim.world, point, PLAYER);
+      if (space === BuildSpace.None || !canHostSize(space, info.size)) continue;
+
+      const soil = sim.world.grid
+        .pointsWithin(point, 2)
+        .filter((near) => sim.world.farmableSides(near) >= 4).length;
+      if (soil > bestSoil) {
+        bestSoil = soil;
+        best = point;
+      }
+    }
+
+    if (best === undefined) return undefined;
+    if (!sim.placeBuilding(PLAYER, best, BuildingType.Farm).ok) return undefined;
+
+    const farm = sim.buildings.find((candidate) => candidate.point === best)!;
+    const route = planRoad(sim.world, hq.flagPoint, farm.flagPoint, PLAYER);
+    if (route) sim.placeRoad(PLAYER, route);
+    return farm.id;
   }
 
   it('sows fields, lets them ripen, and cuts them for grain', () => {
@@ -1018,13 +1065,45 @@ describe('geologists', () => {
     return best;
   }
 
-  it('refuses to set out from a flag with no rock in reach', () => {
+  it('refuses to set out where everything has already been surveyed', () => {
     const sim = newGame();
     const hq = headquarters(sim);
-    // The headquarters sits on levelled ground by construction, so there is
-    // nothing for a geologist to strike anywhere near it.
+
+    sim.world.resourceKnown.fill(1);
+
     const result = sim.sendGeologist(PLAYER, hq.flagPoint);
     expect(result.ok).toBe(false);
+  });
+
+  it('prospects for water when there is no rock within reach', () => {
+    // The headquarters stands on levelled ground with no mountain near it, so
+    // a geologist sent from its own flag has only groundwater to look for.
+    const sim = newGame();
+    const hq = headquarters(sim);
+
+    expect(sim.sendGeologist(PLAYER, hq.flagPoint).ok).toBe(true);
+    run(sim, 4000);
+
+    const wells = [...sim.world.resourceKnown.keys()].filter(
+      (point) =>
+        sim.world.resourceKnown[point] === 1 && sim.world.resource[point] === Resource.Water,
+    );
+    expect(wells.length).toBeGreaterThan(0);
+  });
+
+  it('marks only the spot it actually struck', () => {
+    const sim = newGame();
+    const hq = headquarters(sim);
+    expect(sim.sendGeologist(PLAYER, hq.flagPoint).ok).toBe(true);
+
+    run(sim, 4000);
+
+    let known = 0;
+    for (let point = 0; point < sim.world.grid.size; point += 1) {
+      if (sim.world.resourceKnown[point]) known += 1;
+    }
+    // Three surveys, three holes — not three patches of hillside.
+    expect(known).toBeLessThanOrEqual(3);
   });
 
   it('marks what it finds and comes home with its hammer', () => {
@@ -1049,9 +1128,10 @@ describe('geologists', () => {
     }
     expect(surveyed).toBeGreaterThan(0);
 
-    // He is a settler on loan, not a settler spent.
-    run(sim, 6000);
-    expect(sim.population(PLAYER)).toBe(populationBefore);
+    // He is a settler on loan, not a settler spent: nobody is lost on the way,
+    // and the hammer comes back with him.
+    runWatchingPopulation(sim, 6000);
+    expect(sim.population(PLAYER)).toBeGreaterThanOrEqual(populationBefore);
     expect(sim.storedWare(PLAYER, Ware.Hammer)).toBe(hammersBefore);
   });
 
@@ -1122,5 +1202,201 @@ describe('the metalworks', () => {
     }
 
     expect(sim.storedWare(PLAYER, Ware.Scythe)).toBeGreaterThan(0);
+  });
+});
+
+describe('a building cut off from every store', () => {
+  it('goes on working into its own flag instead of stopping dead', () => {
+    const sim = newGame();
+    const id = buildAndConnect(sim, BuildingType.Woodcutter, MapObject.Tree)!;
+    run(sim, 3000);
+
+    const hut = sim.buildings.require(id);
+    expect(hut.state).toBe(BuildingState.Complete);
+
+    // Cut the road, leaving the hut and its flag standing.
+    const road = sim.roads.all()[0]!;
+    expect(sim.demolishRoad(PLAYER, road.points[1]!).ok).toBe(true);
+
+    run(sim, 12000);
+
+    const flag = sim.flags.require(sim.world.flag[hut.flagPoint]!);
+    // Logs pile up against the door rather than the hut producing exactly one
+    // and giving up for good.
+    expect(flag.wares.length).toBeGreaterThan(1);
+    expect(flag.wares.every((parcel) => parcel.ware === Ware.Log)).toBe(true);
+  });
+
+  it('stacks up to the flag capacity and no further', () => {
+    const sim = newGame();
+    const id = buildAndConnect(sim, BuildingType.Woodcutter, MapObject.Tree)!;
+    run(sim, 3000);
+
+    const hut = sim.buildings.require(id);
+    const road = sim.roads.all()[0]!;
+    sim.demolishRoad(PLAYER, road.points[1]!);
+    run(sim, 30000);
+
+    const flag = sim.flags.require(sim.world.flag[hut.flagPoint]!);
+    expect(flag.wares.length).toBeLessThanOrEqual(FLAG_CAPACITY);
+  });
+
+  it('moves the backlog once a road reaches it again', () => {
+    const sim = newGame();
+    const id = buildAndConnect(sim, BuildingType.Woodcutter, MapObject.Tree)!;
+    run(sim, 3000);
+
+    const hut = sim.buildings.require(id);
+    const road = sim.roads.all()[0]!;
+    sim.demolishRoad(PLAYER, road.points[1]!);
+    run(sim, 12000);
+
+    const stored = sim.storedWare(PLAYER, Ware.Log);
+    const route = planRoad(sim.world, headquarters(sim).flagPoint, hut.flagPoint, PLAYER);
+    expect(route).toBeDefined();
+    expect(sim.placeRoad(PLAYER, route!).ok).toBe(true);
+
+    run(sim, 12000);
+    expect(sim.storedWare(PLAYER, Ware.Log)).toBeGreaterThan(stored);
+  });
+});
+
+describe('a settler sent somewhere new mid-stride', () => {
+  it('finishes the pace he is taking instead of snapping back', () => {
+    const sim = newGame();
+    buildAndConnect(sim, BuildingType.Woodcutter, MapObject.Tree);
+    run(sim, 1500);
+
+    const road = sim.roads.all()[0]!;
+    const carrier = sim.settlers.require(road.carrier);
+
+    // Put him at one end with nothing to do, so he sets off for his post.
+    carrier.state = SettlerState.CarrierWaiting;
+    carrier.carrying = null;
+    carrier.point = road.points[0]!;
+    carrier.fromPoint = carrier.point;
+    carrier.toPoint = carrier.point;
+    carrier.path = [];
+    carrier.pathIndex = 0;
+
+    // Catch him just after setting off, so the stride cannot finish on the very
+    // tick we interrupt it. Being between two points is the state the old code
+    // mishandled.
+    let strides = 0;
+    while (strides < 200 && !(carrier.stepProgress === 1 && carrier.toPoint !== carrier.point)) {
+      sim.update();
+      strides += 1;
+    }
+    expect(carrier.stepProgress).toBe(1);
+    expect(carrier.stepLength).toBeGreaterThan(2);
+
+    const wasWalkingTo = carrier.toPoint;
+    const wasWalkingFrom = carrier.fromPoint;
+    const wasProgress = carrier.stepProgress;
+
+    // Now put a log at the far end, bound for the headquarters, so he must turn
+    // round and go back for it — an interruption in the middle of a stride.
+    const far = sim.flags.require(
+      sim.world.flag[headquarters(sim).flagPoint] === road.fromFlag ? road.toFlag : road.fromFlag,
+    );
+    far.wares.push({ ware: Ware.Log, destination: headquarters(sim).id });
+
+    sim.update();
+    expect(carrier.state).toBe(SettlerState.CarrierCollecting);
+
+    // The stride he was taking is untouched: same two points, same progress.
+    // The old code threw it away and started him again from the point behind.
+    expect(carrier.fromPoint).toBe(wasWalkingFrom);
+    expect(carrier.toPoint).toBe(wasWalkingTo);
+    expect(carrier.stepProgress).toBe(wasProgress);
+
+    // And on the next tick he simply walks on.
+    sim.update();
+    expect(carrier.stepProgress).toBeGreaterThan(wasProgress);
+    expect(carrier.toPoint).toBe(wasWalkingTo);
+  });
+});
+
+describe('building with what has arrived', () => {
+  it('raises a site as its boards turn up, and leaves the stone until last', () => {
+    const sim = newGame();
+    // A sawmill costs 3 boards then 2 stone, so the two materials are ordered.
+    const id = buildAndConnect(sim, BuildingType.Sawmill)!;
+    expect(id).toBeDefined();
+
+    const site = sim.buildings.require(id);
+    const info = buildingInfo(BuildingType.Sawmill);
+    const total = info.cost.reduce((sum, item) => sum + item.count, 0);
+
+    let sawPartial = false;
+
+    for (let i = 0; i < 12000; i += 1) {
+      sim.update();
+      if (site.state === BuildingState.Complete) break;
+
+      const boards = site.delivered[0]!;
+      const stone = site.delivered[1]!;
+
+      // Work is never further along than the delivered materials allow, and
+      // stone counts for nothing until every board is there.
+      const usable = boards < info.cost[0]!.count ? boards : boards + stone;
+      const allowed = Math.floor((info.buildTicks * usable) / total);
+      expect(site.buildProgress).toBeLessThanOrEqual(allowed);
+
+      if (site.buildProgress > 0 && boards < info.cost[0]!.count) sawPartial = true;
+    }
+
+    // It really did rise before everything had arrived.
+    expect(sawPartial).toBe(true);
+    expect(site.state).toBe(BuildingState.Complete);
+  });
+});
+
+describe('a growing population', () => {
+  it('adds settlers over time and then levels off', () => {
+    const sim = newGame();
+    const before = sim.population(PLAYER);
+
+    run(sim, 6000);
+    const middle = sim.population(PLAYER);
+    expect(middle).toBeGreaterThan(before);
+
+    // With nothing new built, the province stops taking people in.
+    run(sim, 30000);
+    expect(sim.population(PLAYER)).toBe(middle);
+  });
+
+  it('supports more people as more is built', () => {
+    const sim = newGame();
+    run(sim, 8000);
+    const bare = sim.population(PLAYER);
+
+    buildAndConnect(sim, BuildingType.Woodcutter, MapObject.Tree);
+    buildAndConnect(sim, BuildingType.Forester);
+    run(sim, 20000);
+
+    expect(sim.population(PLAYER)).toBeGreaterThan(bare);
+  });
+});
+
+describe('ore in the mountains', () => {
+  it('never sits on the outermost rock', () => {
+    const sim = newGame(1039);
+    const world = sim.world;
+    const ores: Resource[] = [Resource.Coal, Resource.Iron, Resource.Gold, Resource.Granite];
+
+    let checked = 0;
+    for (let point = 0; point < world.grid.size; point += 1) {
+      if (!ores.includes(world.resource[point] as Resource)) continue;
+      checked += 1;
+
+      // Two full rings of rock around every seam, so a border nudged against a
+      // hillside finds nothing without going in properly.
+      for (const near of world.grid.pointsWithin(point, 2)) {
+        expect(world.isWalkable(near)).toBe(true);
+      }
+    }
+
+    expect(checked).toBeGreaterThan(0);
   });
 });

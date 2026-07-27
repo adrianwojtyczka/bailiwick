@@ -249,14 +249,53 @@ function generateObjects(world: World, seed: number): void {
   }
 }
 
+/** How far inside a range the rock must be before it carries ore. */
+const BARREN_MOUNTAIN_RIM = 2;
+
+/**
+ * Marks the rock that lies well inside a range.
+ *
+ * Ore on the outermost slopes would be found the moment a player nudged a
+ * border against a hill. Keeping the rim barren means the mountains have to be
+ * entered properly before they give anything up.
+ *
+ * Computed as one pass over the map and then a neighbourhood test against that,
+ * rather than re-deriving each point's terrain nineteen times over.
+ */
+function findDeepRock(world: World): Uint8Array {
+  const { grid } = world;
+
+  const solid = new Uint8Array(grid.size);
+  for (let index = 0; index < grid.size; index += 1) {
+    if (surroundings(world, index).mineable === 6) solid[index] = 1;
+  }
+
+  const deep = new Uint8Array(grid.size);
+  for (let index = 0; index < grid.size; index += 1) {
+    if (!solid[index]) continue;
+
+    let buried = true;
+    for (const near of grid.pointsWithin(index, BARREN_MOUNTAIN_RIM)) {
+      if (!solid[near]) {
+        buried = false;
+        break;
+      }
+    }
+    if (buried) deep[index] = 1;
+  }
+
+  return deep;
+}
+
 function generateResources(world: World, seed: number): void {
   const { grid } = world;
   const rng = new Rng(seed ^ 0x2f8a17c5);
+  const deepRock = findDeepRock(world);
 
   for (let index = 0; index < grid.size; index += 1) {
     const around = surroundings(world, index);
 
-    if (around.mineable >= 4) {
+    if (deepRock[index]) {
       // Ore bodies are laid out in broad bands so a geologist's find tells the
       // player something useful about the whole ridge.
       const band = fractalNoise(seed ^ 0x6d1a3f77, grid.worldX(index), grid.worldY(index), 2, 0.07);

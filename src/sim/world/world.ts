@@ -197,6 +197,23 @@ export class World {
     }
     return false;
   }
+
+  /**
+   * How many of the six triangles meeting at a point will grow corn. A farmer
+   * needs most of them, not all: a field may lie along the edge of good ground.
+   */
+  farmableSides(point: number): number {
+    const triangles = SCRATCH_TRIANGLES;
+    this.trianglesAroundPoint(point, triangles);
+
+    let sides = 0;
+    for (let i = 0; i < 6; i += 1) {
+      const triangle = triangles[i]!;
+      if (triangle === OUT_OF_BOUNDS) continue;
+      if (this.propertiesOfTriangle(triangle).farmable) sides += 1;
+    }
+    return sides;
+  }
 }
 
 const SCRATCH_TRIANGLES = new Int32Array(6);

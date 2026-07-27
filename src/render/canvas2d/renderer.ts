@@ -19,14 +19,15 @@ import type { Renderer, ViewState } from '../renderer';
 import { TerrainChunks } from './terrain-chunks';
 
 /**
- * How each kind of deposit is marked once a geologist has found it. Water and
- * fish are left out: a well works anywhere and shoals are plain to see.
+ * How each kind of deposit is marked once a geologist has found it. Fish are
+ * left out: a shoal is plain to see without anybody digging for it.
  */
 const DEPOSIT_COLOURS: Readonly<Partial<Record<Resource, string>>> = {
   [Resource.Coal]: '#38332e',
   [Resource.Iron]: '#7d5c4a',
   [Resource.Gold]: '#e0b53a',
   [Resource.Granite]: '#9a9187',
+  [Resource.Water]: '#5f92ad',
 };
 
 /** Zoom is snapped to these steps before terrain is baked, so panning at a

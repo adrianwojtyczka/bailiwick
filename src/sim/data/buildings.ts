@@ -340,7 +340,7 @@ export const BUILDINGS: readonly BuildingInfo[] = [
     cost: [boards(3), stones(3)],
     buildTicks: 620,
     worker: Profession.Farmer,
-    behaviour: { kind: 'farm', output: Ware.Grain, radius: 5, workTicks: 170 },
+    behaviour: { kind: 'farm', output: Ware.Grain, radius: 2, workTicks: 170 },
     available: true,
     description: 'Sows and reaps grain on the surrounding fields.',
   },
