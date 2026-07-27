@@ -2096,3 +2096,215 @@ describe('saying a building has run out', () => {
     expect(exhausted[0]!.point).toBe(hut.point);
   });
 });
+
+describe('one carrier to a road', () => {
+  /**
+   * The books kept about carriers, checked both ways.
+   *
+   * Every settler who thinks he works a road must be the man that road names,
+   * and every carrier must be standing on the stretch he works. A settler who
+   * fails either test is a ghost: he will never be given work, never be sent
+   * home, and — if he is off his road — never move again, because every route
+   * a carrier takes is computed along the road's own points.
+   */
+  function carrierProblems(sim: Simulation): string[] {
+    const problems: string[] = [];
+
+    for (const settler of sim.settlers.all()) {
+      if (settler.road === 0) continue;
+      const road = sim.roads.get(settler.road);
+      if (!road) {
+        problems.push(`settler ${settler.id} holds road ${settler.road}, which no longer exists`);
+      } else if (road.carrier !== settler.id) {
+        problems.push(`settler ${settler.id} claims road ${road.id}, whose carrier is ${road.carrier}`);
+      }
+    }
+
+    for (const road of sim.roads.all()) {
+      const carrier = sim.settlers.get(road.carrier);
+      if (!carrier || carrier.state === SettlerState.WalkingToJob) continue;
+      // A man with a path under him is on his way somewhere and will arrive.
+      // What must never happen is one standing still, off his own road, with
+      // nothing to do — there is no tick that would ever move him again.
+      if (carrier.path.length > 0) continue;
+      if (!road.points.includes(carrier.point)) {
+        problems.push(`road ${road.id} carrier ${carrier.id} stands at ${carrier.point}, off it`);
+      }
+    }
+
+    return problems;
+  }
+
+  /** Every spot within reach that will take a hut, furthest from the door first. */
+  function sitesAround(sim: Simulation): number[] {
+    const hq = headquarters(sim);
+    const info = buildingInfo(BuildingType.Sawmill);
+
+    return sim.world.grid
+      .pointsWithin(hq.point, 9)
+      .filter((point) => {
+        if (sim.world.grid.distance(hq.point, point) < 4) return false;
+        const space = evaluateBuildSpace(sim.world, point, PLAYER);
+        return space !== BuildSpace.None && canHostSize(space, info.size);
+      });
+  }
+
+  function connect(sim: Simulation, point: number): number {
+    expect(sim.placeBuilding(PLAYER, point, BuildingType.Sawmill).ok).toBe(true);
+    const building = sim.buildings.find((candidate) => candidate.point === point)!;
+    const route = planRoad(sim.world, headquarters(sim).flagPoint, building.flagPoint, PLAYER);
+    expect(sim.placeRoad(PLAYER, route!).ok).toBe(true);
+    return building.id;
+  }
+
+  it('sends home a settler still walking out to a road that is torn up', () => {
+    const sim = newGame();
+    const sites = sitesAround(sim);
+
+    connect(sim, sites[0]!);
+    const road = sim.roads.all()[0]!;
+
+    // Catch him after the road has asked for a carrier and before he arrives.
+    let walker: ReturnType<typeof sim.settlers.get>;
+    for (let i = 0; i < 200 && !walker; i += 1) {
+      sim.update();
+      if (!road.carrierRequested || road.carrier !== 0) continue;
+      walker = sim.settlers.all().find((settler) => settler.road === road.id);
+    }
+    expect(walker).toBeDefined();
+    expect(walker!.state).toBe(SettlerState.WalkingToJob);
+
+    const retired = road.id;
+    expect(sim.demolishRoad(PLAYER, road.points[1]!).ok).toBe(true);
+
+    // He must not still be carrying a dead road's name about with him. Entity
+    // ids are recycled, so holding one means arriving at a road that is now
+    // somewhere else entirely and taking it over.
+    expect(walker!.road).toBe(0);
+
+    // Lay another road, which takes the freed id.
+    connect(sim, sites[sites.length - 1]!);
+    expect(sim.roads.all().some((other) => other.id === retired)).toBe(true);
+
+    run(sim, 400);
+    expect(carrierProblems(sim)).toEqual([]);
+  });
+
+  it('retires a carrier his road no longer names', () => {
+    const sim = newGame();
+    connect(sim, sitesAround(sim)[0]!);
+    run(sim, 600);
+
+    const road = sim.roads.all()[0]!;
+    const carrier = sim.settlers.require(road.carrier);
+
+    // A second man on the same stretch, as an inconsistent save carries.
+    const ghost = sim.settlers.all().find((settler) => settler.road === 0 && settler.id !== carrier.id)!;
+    ghost.road = road.id;
+    ghost.state = SettlerState.CarrierWaiting;
+    expect(carrierProblems(sim)).not.toEqual([]);
+
+    run(sim, 200);
+    expect(carrierProblems(sim)).toEqual([]);
+  });
+
+  it('walks a carrier back to his road instead of leaving him standing', () => {
+    const sim = newGame();
+    connect(sim, sitesAround(sim)[0]!);
+
+    // He has to be genuinely idle at his post: a carrier caught mid-delivery
+    // already has a path under him and would walk on whatever we did to him.
+    const road = sim.roads.all()[0]!;
+    let carrier: ReturnType<typeof sim.settlers.get>;
+    for (let i = 0; i < 2000 && !carrier; i += 1) {
+      sim.update();
+      const candidate = sim.settlers.get(road.carrier);
+      if (candidate?.state === SettlerState.CarrierWaiting && candidate.path.length === 0) {
+        carrier = candidate;
+      }
+    }
+    expect(carrier).toBeDefined();
+
+    // Put him well off his own stretch, as the ghost in the reported save was.
+    // Every route a carrier plans runs along his road's own points, so without
+    // a way back across open ground he stands here for the rest of the game.
+    const stranded = sim.world.grid
+      .pointsWithin(headquarters(sim).point, 4)
+      .find(
+        (point) =>
+          sim.world.isWalkable(point) &&
+          !road.points.includes(point) &&
+          sim.world.grid.distance(point, road.points[0]!) >= 3,
+      )!;
+    expect(stranded).toBeDefined();
+
+    carrier!.point = stranded;
+    carrier!.fromPoint = stranded;
+    carrier!.toPoint = stranded;
+    carrier!.stepProgress = 0;
+    carrier!.path = [];
+    carrier!.pathIndex = 0;
+
+    run(sim, 400);
+    expect(carrier!.point).not.toBe(stranded);
+    expect(carrierProblems(sim)).toEqual([]);
+  });
+});
+
+describe('where a carrier waits', () => {
+  /** Lays a long road and splits it, to get stretches of a chosen length. */
+  function splitRoad(sim: Simulation, at: number) {
+    const hq = headquarters(sim);
+    const info = buildingInfo(BuildingType.Sawmill);
+
+    let far: number | undefined;
+    let furthest = 0;
+    for (const point of sim.world.grid.pointsWithin(hq.point, 9)) {
+      const distance = sim.world.grid.distance(hq.point, point);
+      if (distance <= furthest) continue;
+      const space = evaluateBuildSpace(sim.world, point, PLAYER);
+      if (space === BuildSpace.None || !canHostSize(space, info.size)) continue;
+      furthest = distance;
+      far = point;
+    }
+
+    expect(sim.placeBuilding(PLAYER, far!, BuildingType.Sawmill).ok).toBe(true);
+    const site = sim.buildings.find((building) => building.point === far)!;
+    expect(sim.placeRoad(PLAYER, planRoad(sim.world, hq.flagPoint, site.flagPoint, PLAYER)!).ok).toBe(
+      true,
+    );
+
+    const whole = sim.roads.all()[0]!;
+    expect(sim.placeFlag(PLAYER, whole.points[at]!).ok).toBe(true);
+    run(sim, 3000);
+  }
+
+  it('stands halfway between two nodes when the stretch has no middle one', () => {
+    const sim = newGame();
+    splitRoad(sim, 3);
+
+    const road = sim.roads.all().find((candidate) => candidate.points.length % 2 === 0)!;
+    expect(road).toBeDefined();
+
+    const carrier = sim.settlers.require(road.carrier);
+    expect(carrier.state).toBe(SettlerState.CarrierWaiting);
+
+    // Two flags three nodes apart: the centre falls between the middle pair,
+    // and posting him on either would have him hugging one flag.
+    const middle = road.points.length / 2;
+    expect(carrier.point).toBe(road.points[middle - 1]);
+    expect(carrier.toPoint).toBe(road.points[middle]);
+    expect(sim.stepFraction(carrier)).toBe(0.5);
+  });
+
+  it('stands on the middle node when the stretch has one', () => {
+    const sim = newGame();
+    splitRoad(sim, 2);
+
+    const road = sim.roads.all().find((candidate) => candidate.points.length % 2 === 1)!;
+    const carrier = sim.settlers.require(road.carrier);
+
+    expect(carrier.point).toBe(road.points[(road.points.length - 1) / 2]);
+    expect(sim.stepFraction(carrier)).toBe(0);
+  });
+});

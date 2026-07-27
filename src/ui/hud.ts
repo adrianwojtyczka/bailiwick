@@ -28,6 +28,56 @@ const STATUS_TEXT: Readonly<Record<BuildingStatus, string>> = {
   [BuildingStatus.Unreachable]: 'No road connects this to your network',
 };
 
+/**
+ * A short summary of everything the panel shows about a point.
+ *
+ * The panel reads the simulation live, so it goes stale the moment the world
+ * under the selected node changes — place a flag and the ground panel would go
+ * on offering to place one. Re-rendering every frame would rebuild the buttons
+ * sixty times a second under the player's thumb, so instead this is compared
+ * against last frame's and the panel is rebuilt only when it has really moved.
+ *
+ * A handful of typed-array reads per frame, and no more lying.
+ */
+export function panelSignature(simulation: Simulation, point: number): string {
+  if (point < 0) return '';
+
+  const world = simulation.world;
+  const parts = [
+    point,
+    world.building[point] ?? 0,
+    world.flag[point] ?? 0,
+    world.roadCount(point),
+    world.object[point] ?? 0,
+    world.objectData[point] ?? 0,
+    world.resourceKnown[point] ?? 0,
+    world.resource[point] ?? 0,
+    world.resourceAmount[point] ?? 0,
+  ];
+
+  const buildingId = world.building[point];
+  const building = buildingId ? simulation.buildings.get(buildingId) : undefined;
+  if (building) {
+    parts.push(
+      building.state,
+      building.status,
+      building.buildProgress,
+      building.reserve,
+      ...building.delivered,
+      ...building.inputs,
+      ...building.stock,
+    );
+  }
+
+  const flagId = world.flag[point];
+  const flag = flagId ? simulation.flags.get(flagId) : undefined;
+  if (flag) {
+    parts.push(flag.building, flag.wares.length, ...flag.wares.map((parcel) => parcel.ware));
+  }
+
+  return parts.join(',');
+}
+
 export interface HudCallbacks {
   chooseBuilding(type: BuildingType): void;
   cancelMode(): void;
@@ -80,6 +130,7 @@ export class Hud {
   private messagesOpen = false;
   private lastEventCount = 0;
   private readCount = 0;
+  private panelState = '';
   private state: HudState = {
     selectedPoint: -1,
     pendingBuilding: null,
@@ -143,7 +194,15 @@ export class Hud {
     // to invalidate the action bar as well as the panel.
     const modeChanged =
       state.pendingBuilding !== this.state.pendingBuilding || state.roadFrom !== this.state.roadFrom;
-    const selectionChanged = modeChanged || state.selectedPoint !== this.state.selectedPoint;
+
+    // The world under a node changes without the selection moving — a flag goes
+    // up, a house is finished, a crate arrives — and the panel has to follow.
+    const signature = panelSignature(this.simulation, state.selectedPoint);
+    const contentChanged = signature !== this.panelState;
+    this.panelState = signature;
+
+    const selectionChanged =
+      modeChanged || state.selectedPoint !== this.state.selectedPoint || contentChanged;
     const speedChanged = state.speed !== this.state.speed;
     const noticeChanged = state.notice !== this.state.notice;
 

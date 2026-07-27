@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { Hasher } from '../core/hash';
-import { BuildSpace, evaluateBuildSpace } from './buildspace';
+import { BuildSpace, canPlaceFlag, evaluateBuildSpace } from './buildspace';
 import { MapObject, Terrain } from './terrain';
 import type { World } from './world';
 import { generateWorld } from './worldgen';
@@ -78,16 +78,39 @@ describe('generateWorld', () => {
     }
   });
 
-  it('gives every start wood and stone within reach', () => {
-    const { world, startPoints } = generateWorld(OPTIONS);
+  const SEEDS = [4242, 726, 99, 11, 1234, 7, 55555, 192792530];
 
-    for (const point of startPoints) {
-      const nearby = world.grid.pointsWithin(point, 9);
-      const trees = nearby.filter((p) => world.object[p] === MapObject.Tree).length;
-      const stone = nearby.filter((p) => world.object[p] === MapObject.Stone).length;
+  it('leaves an apron two nodes wide that can actually be built on', () => {
+    for (const seed of SEEDS) {
+      const { world, startPoints } = generateWorld({ ...OPTIONS, seed });
+      world.owner.fill(1);
 
-      expect(trees).toBeGreaterThan(0);
-      expect(stone).toBeGreaterThan(0);
+      for (const point of startPoints) {
+        for (const near of world.grid.pointsWithin(point, 2)) {
+          // Swept of trees and stone is not enough: a pond or a crag on the
+          // doorstep would block the first roads out of the headquarters. Every
+          // node in the apron has to take a flag, which is what a road needs.
+          expect(world.object[near]).toBe(MapObject.None);
+          expect(canPlaceFlag(world, near, 1)).toBe(true);
+        }
+      }
+    }
+  });
+
+  it('gives every start wood and stone within its own borders', () => {
+    for (const seed of SEEDS) {
+      const { world, startPoints } = generateWorld({ ...OPTIONS, seed });
+
+      for (const point of startPoints) {
+        const nearby = world.grid.pointsWithin(point, 9);
+        const trees = nearby.filter((p) => world.object[p] === MapObject.Tree).length;
+        const stone = nearby.filter((p) => world.object[p] === MapObject.Stone).length;
+
+        // Enough to open with, on every seed rather than the lucky ones: a
+        // start with three trees and no granite has nowhere to go.
+        expect(trees).toBeGreaterThanOrEqual(20);
+        expect(stone).toBeGreaterThanOrEqual(4);
+      }
     }
   });
 

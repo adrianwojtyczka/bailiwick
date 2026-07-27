@@ -200,3 +200,35 @@ test('the page works offline once the service worker has cached it', async ({ pa
   await expect(page.locator('.title__name')).toHaveText('Bailiwick');
   await context.setOffline(false);
 });
+
+test('the panel follows the world without re-tapping the node', async ({ page }) => {
+  await startNewGame(page);
+
+  // Find a node the ground panel offers a flag on, and take it.
+  const centre = await canvasCentre(page);
+  const panel = page.locator('.panel');
+  const placeFlag = page.getByRole('button', { name: 'Place a flag' });
+
+  let found = false;
+  for (const radius of [70, 110, 150]) {
+    for (let step = 0; step < 8 && !found; step += 1) {
+      const angle = (step / 8) * Math.PI * 2;
+      await page.mouse.click(
+        centre.x + Math.round(Math.cos(angle) * radius),
+        centre.y + Math.round(Math.sin(angle) * radius * 0.62),
+      );
+      await page.waitForTimeout(120);
+      found = await placeFlag.isVisible();
+    }
+    if (found) break;
+  }
+  expect(found).toBe(true);
+
+  await placeFlag.click();
+
+  // The selection has not moved, so the panel used to sit there describing bare
+  // ground and offering to place a second flag. It must describe the flag now.
+  await expect(panel.locator('.panel__title')).toHaveText('Flag');
+  await expect(page.getByRole('button', { name: 'Lay a road from here' })).toBeVisible();
+  await expect(placeFlag).toHaveCount(0);
+});

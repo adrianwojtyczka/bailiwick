@@ -30,6 +30,34 @@ const SNOW_LEVEL = 37;
 const START_FLATTEN_RADIUS = 6;
 const MIN_PLAYER_SEPARATION = 18;
 
+/**
+ * The apron kept clear and level around a headquarters, in nodes.
+ *
+ * Not merely swept of trees: every node within it has to be ground a settler
+ * could build or lay a road on, so the opening moves are never blocked by a
+ * pond or a crag right on the doorstep.
+ */
+const START_CLEAR_RADIUS = 2;
+
+/**
+ * How far a headquarters claims, matching `HEADQUARTERS_RADIUS` in the
+ * simulation. Wood and stone have to fall inside it to be of any use on the
+ * first day.
+ */
+const START_TERRITORY_RADIUS = 9;
+
+/** Wood and stone a start is guaranteed within its own borders. */
+const START_TREES = 20;
+const START_OUTCROPS = 4;
+
+/**
+ * Where anything planted to make up the shortfall goes: out of the apron, in
+ * from the frontier, and near enough that a hut sited on the doorstep still
+ * reaches it.
+ */
+const STOCK_INNER_RADIUS = 5;
+const STOCK_OUTER_RADIUS = 8;
+
 // ------------------------------------------------------------------- noise
 
 function hashInt(seed: number, x: number, y: number): number {
@@ -402,6 +430,14 @@ function scoreStartSite(world: World, point: number): number {
   if (world.maxSlopeAround(point) > 1) return -1;
   if (world.object[point] !== MapObject.None) return -1;
 
+  // The apron has to be genuinely usable, not just empty of trees: a pond or a
+  // crag two nodes from the door would block the first roads out of it. There
+  // is no shortage of candidates, so this rules out very few sites.
+  for (const candidate of world.grid.pointsWithin(point, START_CLEAR_RADIUS)) {
+    if (surroundings(world, candidate).buildable < 6) return -1;
+    if (world.maxSlopeAround(candidate) > 1) return -1;
+  }
+
   let openGround = 0;
   let trees = 0;
   let stone = 0;
@@ -469,9 +505,79 @@ function prepareStartArea(world: World, point: number): void {
     world.height[candidate] = Math.round(world.height[candidate]! * blend + level * (1 - blend));
   }
 
-  for (const candidate of world.grid.pointsWithin(point, 2)) {
+  for (const candidate of world.grid.pointsWithin(point, START_CLEAR_RADIUS)) {
     world.object[candidate] = MapObject.None;
     world.objectData[candidate] = 0;
+  }
+}
+
+/**
+ * Makes sure a start has wood and stone inside its own borders.
+ *
+ * The site score rewards trees and outcrops but has never required them, so a
+ * seed could open on beautiful empty grassland with nothing to cut and nothing
+ * to quarry — an opening with no way out of it. Rather than reject such a map
+ * and risk finding no site at all, the shortfall is planted: a wood in a couple
+ * of clumps and a few outcrops, out beyond the cleared apron but well inside
+ * the frontier.
+ *
+ * Seeded throughout, so the island stays a pure function of its seed.
+ */
+function stockStartArea(world: World, point: number, seed: number): void {
+  const { grid } = world;
+  const rng = new Rng(seed ^ (point * 0x9e3779b1));
+
+  let trees = 0;
+  let outcrops = 0;
+  for (const candidate of grid.pointsWithin(point, START_TERRITORY_RADIUS)) {
+    if (world.object[candidate] === MapObject.Tree) trees += 1;
+    if (world.object[candidate] === MapObject.Stone) outcrops += 1;
+  }
+
+  // Only the ring between the apron and the frontier is available, and only
+  // where nothing stands already.
+  const open: number[] = [];
+  for (const candidate of grid.pointsWithin(point, STOCK_OUTER_RADIUS)) {
+    if (grid.distance(point, candidate) < STOCK_INNER_RADIUS) continue;
+    if (world.object[candidate] !== MapObject.None) continue;
+    open.push(candidate);
+  }
+
+  const plantable = open.filter((candidate) => surroundings(world, candidate).plantable === 6);
+  const buildable = open.filter((candidate) => surroundings(world, candidate).buildable === 6);
+
+  // A wood, not a sprinkle: saplings go in around a couple of seed points, so
+  // the result reads like a copse rather than a dusting of single trees.
+  let wanted = START_TREES - trees;
+  while (wanted > 0 && plantable.length > 0) {
+    const heart = rng.pick(plantable)!;
+    for (const candidate of grid.pointsWithin(heart, 2)) {
+      if (wanted <= 0) break;
+      if (world.object[candidate] !== MapObject.None) continue;
+      if (grid.distance(point, candidate) < STOCK_INNER_RADIUS) continue;
+      if (surroundings(world, candidate).plantable < 6) continue;
+      if (!rng.chance(0.7)) continue;
+
+      world.object[candidate] = MapObject.Tree;
+      world.objectData[candidate] = TREE_FULLY_GROWN;
+      wanted -= 1;
+    }
+
+    // Nothing took around this heart, so there is nothing to be gained by
+    // trying it again.
+    const at = plantable.indexOf(heart);
+    if (at >= 0) plantable.splice(at, 1);
+  }
+
+  let missing = START_OUTCROPS - outcrops;
+  while (missing > 0 && buildable.length > 0) {
+    const at = rng.nextInt(buildable.length);
+    const candidate = buildable.splice(at, 1)[0]!;
+    if (world.object[candidate] !== MapObject.None) continue;
+
+    world.object[candidate] = MapObject.Stone;
+    world.objectData[candidate] = rng.nextRange(3, 6);
+    missing -= 1;
   }
 }
 
@@ -505,11 +611,14 @@ export function generateWorld(options: WorldGenOptions): GeneratedWorld {
 
   // The prepared start areas must stay clear even after object generation.
   for (const point of startPoints) {
-    for (const candidate of grid.pointsWithin(point, 2)) {
+    for (const candidate of grid.pointsWithin(point, START_CLEAR_RADIUS)) {
       world.object[candidate] = MapObject.None;
       world.objectData[candidate] = 0;
     }
   }
+
+  // Only once the apron is clear, so nothing planted can land back inside it.
+  for (const point of startPoints) stockStartArea(world, point, seed);
 
   return { world, startPoints };
 }

@@ -864,10 +864,19 @@ export class Simulation {
     // The carrier is let go only once the road has really gone and the network
     // knows it. He works out his way home from where he stands, and that route
     // has to be through the country as it is now, not as it was a moment ago.
-    this.roads.remove(road.id);
+    const retired = road.id;
+    this.roads.remove(retired);
     this.network.invalidate();
 
-    if (road.carrier) this.dismissSettler(road.carrier);
+    // Everyone bound to this road goes, not just the man working it: a settler
+    // still walking out to take up the post has to be sent home too. Entity ids
+    // are recycled, so leaving him with a dead road's id in hand means he
+    // arrives to find that id belongs to a road on the other side of the
+    // province — and takes it over, standing nowhere near it. `splitRoadAt` and
+    // `mergeRoadsAt` guard against exactly this; so does this.
+    this.settlers.forEach((settler) => {
+      if (settler.road === retired) this.dismissSettler(settler.id);
+    });
   }
 
   /** Sends a settler back into the nearest store. */
@@ -1298,10 +1307,17 @@ export class Simulation {
 
     if (settler.road !== 0) {
       const road = this.roads.get(settler.road);
-      if (!road) {
+
+      // A road has one carrier, and he stands on it. Anything else means the id
+      // he set out with now belongs to a different road — so he goes home
+      // rather than displacing the man already working it.
+      const taken = road !== undefined && road.carrier !== 0 && road.carrier !== settler.id;
+      const elsewhere = road !== undefined && !road.points.includes(settler.point);
+      if (!road || taken || elsewhere) {
         this.dismissSettler(settler.id);
         return;
       }
+
       road.carrier = settler.id;
       road.carrierRequested = false;
       settler.state = SettlerState.CarrierWaiting;
@@ -1683,6 +1699,13 @@ export class Simulation {
       return true;
     }
 
+    // Two men cannot work one stretch. If the road does not name him, he is a
+    // leftover of some earlier remodelling and his place is back in the store.
+    if (road.carrier !== settler.id) {
+      this.dismissSettler(settler.id);
+      return true;
+    }
+
     // A carrier strolling back to his post may be picked off mid-stride, so
     // every decision here is made from where he will be, not where he was.
     const from = this.committedPoint(settler);
@@ -1738,11 +1761,54 @@ export class Simulation {
     const road = this.roads.get(settler.road);
     if (!road) return;
 
-    const from = this.committedPoint(settler);
-    const post = road.points[Math.floor(road.points.length / 2)]!;
-    if (from === post) return;
+    const post = this.postOf(road);
+    if (settler.point === post.point) {
+      this.waitAtPost(settler, post);
+      return;
+    }
 
-    this.redirect(settler, this.pathAlongRoad(road, from, post) ?? []);
+    // Along the road while he is on it, across open country when he is not. A
+    // carrier who has somehow ended up off his own stretch still has to be able
+    // to reach it: handing him an empty path would leave him standing there for
+    // the rest of the game.
+    const from = this.committedPoint(settler);
+    const path =
+      this.pathAlongRoad(road, from, post.point) ?? walkablePath(this.world, from, post.point);
+    if (path && path.length > 0) this.redirect(settler, path);
+  }
+
+  /**
+   * Where a carrier waits: the middle of his stretch.
+   *
+   * A road of an even number of steps has a node at its centre, and he stands
+   * on it. One of an odd number does not — two flags three nodes apart put the
+   * centre *between* the middle pair — and posting him on either node would
+   * leave him visibly hugging one flag. He waits between them instead.
+   */
+  private postOf(road: Road): { point: number; beyond: number | undefined } {
+    const count = road.points.length;
+    if (count % 2 === 1) return { point: road.points[count >> 1]!, beyond: undefined };
+    return { point: road.points[count / 2 - 1]!, beyond: road.points[count / 2]! };
+  }
+
+  /**
+   * Holds a carrier still at his post, half a step out when the post falls
+   * between two nodes.
+   *
+   * Nothing advances a waiting carrier — the step simply sits at half its
+   * length — so the renderer, which interpolates from one point to the other,
+   * draws him exactly midway. Should work turn up, `committedPoint` reports the
+   * node ahead of him and he finishes the half-step into it rather than
+   * snapping back.
+   */
+  private waitAtPost(settler: Settler, post: { point: number; beyond: number | undefined }): void {
+    if (post.beyond === undefined) return;
+
+    const climb = Math.max(0, this.world.height[post.beyond]! - this.world.height[post.point]!);
+    settler.fromPoint = post.point;
+    settler.toPoint = post.beyond;
+    settler.stepLength = STEP_TICKS + climb * 2;
+    settler.stepProgress = settler.stepLength >> 1;
   }
 
   private collectWare(settler: Settler): void {
@@ -2688,9 +2754,11 @@ export class Simulation {
       const toStart = roadPointPath(this.network, this.roads, storeFlag, road.fromFlag);
       if (!toStart) return;
 
-      // Carriers wait in the middle of their stretch, as in the original.
-      const middle = Math.max(1, Math.floor(road.points.length / 2));
-      const alongRoad = road.points.slice(1, middle + 1);
+      // Carriers wait in the middle of their stretch, as in the original — the
+      // same post `strollToPost` returns them to, so a man's resting place is
+      // the same whether he has just arrived or just finished a delivery.
+      const post = this.postOf(road);
+      const alongRoad = road.points.slice(1, road.points.indexOf(post.point) + 1);
 
       store.reserve -= 1;
 
