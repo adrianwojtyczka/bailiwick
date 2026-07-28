@@ -511,7 +511,12 @@ export class Simulation {
     this.growFields();
     this.growPopulation();
 
-    if (this.tick % STRANDED_SWEEP_INTERVAL === 0) this.retargetStrandedWares();
+    if (this.tick % STRANDED_SWEEP_INTERVAL === 0) {
+      // Re-aim first, then count: the sweep changes where crates are bound, and
+      // the reservations have to agree with where they end up.
+      this.retargetStrandedWares();
+      this.reconcileIncoming();
+    }
   }
 
   /**
@@ -612,9 +617,14 @@ export class Simulation {
     const second = this.createRoad(road.owner, road.points.slice(index), flag.id, road.toFlag);
 
     if (carrier) {
+      // Everything here is judged from the node he is committed to, not the one
+      // behind him: a flag raised under a walking man used to restart his step
+      // from the node he had just left, throwing him backwards.
+      const from = this.committedPoint(carrier);
+
       // The carrier keeps the half it is standing on; `updateRoads` sends a
       // second settler out to the other half on the next tick.
-      const half = first.points.includes(carrier.point) ? first : second;
+      const half = first.points.includes(from) ? first : second;
       half.carrier = carrier.id;
       half.carrierRequested = false;
       carrier.road = half.id;
@@ -624,11 +634,11 @@ export class Simulation {
         // place to hand the crate over; routing takes it onward from there.
         carrier.state = SettlerState.CarrierDelivering;
         carrier.taskPoint = flag.id;
-        this.setPath(carrier, this.pathAlongRoad(half, carrier.point, flag.point) ?? []);
-        if (carrier.path.length === 0) this.deliverWare(carrier);
+        this.redirect(carrier, this.pathAlongRoad(half, from, flag.point) ?? []);
+        if (carrier.pathIndex >= carrier.path.length) this.deliverWare(carrier);
       } else {
         carrier.state = SettlerState.CarrierWaiting;
-        this.setPath(carrier, []);
+        this.haltWhereHeStands(carrier);
       }
     }
   }
@@ -752,6 +762,10 @@ export class Simulation {
   }
 
   private destroyFlag(flag: Flag): void {
+    // Whatever is waiting here goes first, while the roads that lead away are
+    // still standing to carry it.
+    this.rehomeWares(flag);
+
     // A flag with a road on either side is a staging post, not a junction:
     // removing it should join the two stretches back together rather than tear
     // both down and cut off everything beyond.
@@ -821,35 +835,77 @@ export class Simulation {
     );
 
     if (keep) {
+      const from = this.committedPoint(keep);
+
       merged.carrier = keep.id;
       keep.road = merged.id;
       keep.state = SettlerState.CarrierWaiting;
-      this.setPath(keep, []);
+      this.haltWhereHeStands(keep);
 
       if (keep.carrying !== null) {
         // Deliver to whichever end of the joined road is nearer, then let
         // ordinary routing carry the crate on from there.
-        const at = merged.points.indexOf(keep.point);
+        const at = merged.points.indexOf(from);
         const towardsStart = at >= 0 && at * 2 <= merged.points.length;
         const target = towardsStart ? merged.fromFlag : merged.toFlag;
         const targetFlag = this.flags.get(target);
         if (targetFlag) {
           keep.state = SettlerState.CarrierDelivering;
           keep.taskPoint = target;
-          this.setPath(keep, this.pathAlongRoad(merged, keep.point, targetFlag.point) ?? []);
-          if (keep.path.length === 0) this.deliverWare(keep);
+          this.redirect(keep, this.pathAlongRoad(merged, from, targetFlag.point) ?? []);
+          if (keep.pathIndex >= keep.path.length) this.deliverWare(keep);
         }
       }
     }
 
-    // Crates waiting at the flag being removed move onto the joined road.
-    for (const parcel of flag.wares) {
-      const host = this.flags.get(merged.fromFlag) ?? this.flags.get(merged.toFlag);
-      if (host && host.wares.length < FLAG_CAPACITY) host.wares.push(parcel);
-    }
-    flag.wares.length = 0;
-
     return true;
+  }
+
+  /**
+   * Hands on whatever is waiting at a flag that is about to be removed.
+   *
+   * Both ways of taking a flag down used to lose goods. The junction case
+   * dropped them outright — the flag was simply deleted with its crates still
+   * on it — and the merge case shifted them all to one fixed end of the joined
+   * road, which could be the far side of the province, so a crate appeared to
+   * teleport to a building site. Either way the destination went on counting a
+   * ware that no longer existed, and a site waited for it for ever.
+   *
+   * They go to a flag one road away instead: still on the network they were
+   * travelling, and a step rather than a leap from where they stood.
+   */
+  private rehomeWares(flag: Flag): void {
+    if (flag.wares.length === 0) return;
+
+    const neighbours: Flag[] = [];
+    for (const roadId of flag.roads) {
+      const road = this.roads.get(roadId);
+      if (!road) continue;
+      const other = this.flags.get(road.fromFlag === flag.id ? road.toFlag : road.fromFlag);
+      if (other && other.id !== flag.id && !neighbours.includes(other)) neighbours.push(other);
+    }
+    neighbours.sort(
+      (a, b) =>
+        this.world.grid.distance(flag.point, a.point) -
+        this.world.grid.distance(flag.point, b.point),
+    );
+
+    for (const parcel of flag.wares) {
+      const host = neighbours.find((candidate) => candidate.wares.length < FLAG_CAPACITY);
+      if (!host) {
+        // Nowhere left to put it. Losing a crate is survivable; leaving its
+        // place reserved is not, so the destination is told to stop counting on
+        // it and can order another.
+        this.releaseIncoming(parcel.destination, parcel.ware);
+        continue;
+      }
+
+      // The route onward is left to the stranded sweep, which is what re-aims a
+      // crate whose way has just been torn up.
+      host.wares.push(parcel);
+    }
+
+    flag.wares.length = 0;
   }
 
   private destroyRoad(road: Road): void {
@@ -1123,6 +1179,25 @@ export class Simulation {
     settler.fromPoint = settler.point;
     settler.toPoint = settler.point;
     settler.stepProgress = 0;
+  }
+
+  /**
+   * Drops a settler's route without disturbing the step he is taking.
+   *
+   * `setPath(settler, [])` settles a half-taken step by snapping `fromPoint`,
+   * `toPoint` and `stepProgress` back to `point` — right for a settler who has
+   * genuinely stopped, and a jump of up to a whole node for one still walking.
+   * He finishes the pace he is on instead, and whatever comes next starts from
+   * where he really is.
+   */
+  private haltWhereHeStands(settler: Settler): void {
+    if (!this.midStep(settler)) {
+      this.setPath(settler, []);
+      return;
+    }
+
+    settler.path = [settler.toPoint];
+    settler.pathIndex = 0;
   }
 
   /** True while the settler is between two points rather than standing on one. */
@@ -2060,6 +2135,61 @@ export class Simulation {
         if (this.nextFlagFor(flag.id, parcel) !== undefined) continue;
         if (this.isAcceptableHere(flag, parcel)) continue;
         this.retarget(flag, parcel);
+      }
+    });
+  }
+
+  /**
+   * Rebuilds every building's idea of what is on its way from what actually is.
+   *
+   * A reservation is a cache of a fact the world already holds: the crates on
+   * flags and in hands that are bound for a building. Kept only by hand, one
+   * missed release strands a site for good — `outstandingDemand` subtracts the
+   * phantom, the building looks satisfied, and nothing more is ever sent. A
+   * player's barracks sat one stone short with that stone reserved and gone.
+   *
+   * Counting the truth back out costs a sweep of the flags and settlers every
+   * fortieth tick, and makes the invariant self-repairing rather than merely
+   * well guarded — including for saves that already carry the damage.
+   */
+  private reconcileIncoming(): void {
+    const inFlight = new Map<number, number>();
+    const key = (buildingId: number, ware: Ware) => buildingId * WARE_COUNT + ware;
+
+    const bump = (buildingId: number, ware: Ware): void => {
+      if (buildingId === 0) return;
+      const at = key(buildingId, ware);
+      inFlight.set(at, (inFlight.get(at) ?? 0) + 1);
+    };
+
+    this.flags.forEach((flag) => {
+      for (const parcel of flag.wares) bump(parcel.destination, parcel.ware);
+    });
+    this.settlers.forEach((settler) => {
+      if (settler.carrying !== null) bump(settler.carryDestination, settler.carrying);
+    });
+
+    this.buildings.forEach((building) => {
+      const owed = (ware: Ware) => inFlight.get(key(building.id, ware)) ?? 0;
+
+      if (building.state === BuildingState.UnderConstruction) {
+        const cost = buildingInfo(building.type).cost;
+        for (let i = 0; i < cost.length; i += 1) building.incoming[i] = owed(cost[i]!.ware);
+        return;
+      }
+
+      const behaviour = buildingInfo(building.type).behaviour;
+      if (behaviour.kind === 'craft') {
+        for (let i = 0; i < behaviour.inputs.length; i += 1) {
+          building.inputsIncoming[i] = owed(behaviour.inputs[i]!.ware);
+        }
+        return;
+      }
+
+      if (behaviour.kind === 'extract' && behaviour.food) {
+        let total = 0;
+        for (const ware of behaviour.food) total += owed(ware);
+        building.inputsIncoming[0] = total;
       }
     });
   }

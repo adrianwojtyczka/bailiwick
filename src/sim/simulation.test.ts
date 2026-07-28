@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { BuildingType, buildingInfo } from './data/buildings';
 import { DIRECTIONS } from './core/direction';
+import { OUT_OF_BOUNDS } from './core/grid';
 import { Profession } from './data/professions';
 import { Ware } from './data/wares';
 import type { Settler } from './entities/types';
@@ -13,6 +14,7 @@ import {
   canHostSize,
   canPlaceFlag,
   evaluateBuildSpace,
+  FLAG_DIRECTION,
 } from './world/buildspace';
 import { FIELD_FULLY_GROWN, MapObject, Resource, Terrain } from './world/terrain';
 
@@ -2780,4 +2782,301 @@ describe('the province filling up', () => {
     expect(sim.population(PLAYER)).toBe(32 + finished * 4);
     expect(hq.reserve).toBeGreaterThan(0);
   });
+});
+
+describe('taking a flag down', () => {
+  /**
+   * Every ware in the world, wherever it happens to be.
+   *
+   * The invariant that would have caught the reported game: goods do not
+   * evaporate because the player rearranged his roads.
+   */
+  function wareCount(sim: Simulation): number {
+    let total = 0;
+    sim.buildings.forEach((building) => {
+      for (const held of building.stock) total += held;
+      for (const done of building.delivered) total += done;
+      for (const held of building.inputs) total += held;
+      if (building.output !== null) total += 1;
+    });
+    sim.flags.forEach((flag) => {
+      total += flag.wares.length;
+    });
+    sim.settlers.forEach((settler) => {
+      if (settler.carrying !== null) total += 1;
+    });
+    return total;
+  }
+
+  /**
+   * Buildings whose idea of what is coming disagrees with what is really on its
+   * way. A reservation left standing for a ware that no longer exists is what
+   * strands a site for ever: `outstandingDemand` subtracts it, so the building
+   * looks satisfied and nothing more is sent.
+   */
+  function reservationErrors(sim: Simulation): string[] {
+    const inFlight = new Map<string, number>();
+    const bump = (buildingId: number, ware: Ware) => {
+      if (buildingId === 0) return;
+      const key = `${buildingId}:${ware}`;
+      inFlight.set(key, (inFlight.get(key) ?? 0) + 1);
+    };
+
+    sim.flags.forEach((flag) => {
+      for (const parcel of flag.wares) bump(parcel.destination, parcel.ware);
+    });
+    sim.settlers.forEach((settler) => {
+      if (settler.carrying !== null) bump(settler.carryDestination, settler.carrying);
+    });
+
+    const problems: string[] = [];
+    sim.buildings.forEach((building) => {
+      if (building.state !== BuildingState.UnderConstruction) return;
+      buildingInfo(building.type).cost.forEach((item, index) => {
+        const real = inFlight.get(`${building.id}:${item.ware}`) ?? 0;
+        if (building.incoming[index] !== real) {
+          problems.push(
+            `building ${building.id} claims ${building.incoming[index]} of ware ${item.ware}, really ${real}`,
+          );
+        }
+      });
+    });
+    return problems;
+  }
+
+  /** A junction flag with crates waiting on it — the case that lost them. */
+  function junctionWithCrates(sim: Simulation) {
+    const hq = headquarters(sim);
+    const info = buildingInfo(BuildingType.Sawmill);
+
+    let far: number | undefined;
+    let furthest = 0;
+    for (const point of sim.world.grid.pointsWithin(hq.point, 9)) {
+      const distance = sim.world.grid.distance(hq.point, point);
+      if (distance <= furthest) continue;
+      const space = evaluateBuildSpace(sim.world, point, PLAYER);
+      if (space === BuildSpace.None || !canHostSize(space, info.size)) continue;
+      furthest = distance;
+      far = point;
+    }
+    expect(sim.placeBuilding(PLAYER, far!, BuildingType.Sawmill).ok).toBe(true);
+    const site = sim.buildings.find((building) => building.point === far)!;
+    expect(sim.placeRoad(PLAYER, planRoad(sim.world, hq.flagPoint, site.flagPoint, PLAYER)!).ok).toBe(
+      true,
+    );
+
+    const whole = sim.roads.all()[0]!;
+    const middle = [3, 2, 1]
+      .map((index) => whole.points[index])
+      .find((point) => point !== undefined && sim.placeFlag(PLAYER, point).ok);
+    expect(middle).toBeDefined();
+
+    // A third road makes it a junction, so removing it cannot merge two
+    // stretches and the roads come down instead.
+    const hutInfo = buildingInfo(BuildingType.Woodcutter);
+    for (const point of sim.world.grid.pointsWithin(middle!, 5)) {
+      if (sim.world.grid.distance(middle!, point) < 2) continue;
+      const space = evaluateBuildSpace(sim.world, point, PLAYER);
+      if (space === BuildSpace.None || !canHostSize(space, hutInfo.size)) continue;
+      if (!sim.placeBuilding(PLAYER, point, BuildingType.Woodcutter).ok) continue;
+      const hut = sim.buildings.find((building) => building.point === point)!;
+      const spur = planRoad(sim.world, middle!, hut.flagPoint, PLAYER);
+      if (spur && sim.placeRoad(PLAYER, spur).ok) break;
+    }
+
+    let flag: ReturnType<typeof sim.flags.get>;
+    for (let i = 0; i < 4000; i += 1) {
+      sim.update();
+      flag = sim.flags.all().find((candidate) => candidate.point === middle);
+      if (flag && flag.wares.length >= 2) break;
+    }
+    expect(flag).toBeDefined();
+    expect(flag!.wares.length).toBeGreaterThanOrEqual(2);
+    return { flag: flag!, point: middle! };
+  }
+
+  it('keeps the crates that were waiting on it', () => {
+    const sim = newGame();
+    const { point } = junctionWithCrates(sim);
+
+    const before = wareCount(sim);
+    expect(sim.demolishFlag(PLAYER, point).ok).toBe(true);
+
+    // Deleting the flag with its crates still on it destroyed them outright.
+    expect(wareCount(sim)).toBe(before);
+  });
+
+  it('leaves no building counting on a ware that has gone', () => {
+    const sim = newGame();
+    const { point } = junctionWithCrates(sim);
+
+    expect(sim.demolishFlag(PLAYER, point).ok).toBe(true);
+    run(sim, 100);
+
+    expect(reservationErrors(sim)).toEqual([]);
+  });
+
+  it('sets the crates down a road away, not across the province', () => {
+    const sim = newGame();
+    const { flag, point } = junctionWithCrates(sim);
+
+    // The flags one road from here: where a crate may legitimately end up.
+    const oneRoadAway = new Set<number>();
+    for (const roadId of flag.roads) {
+      const road = sim.roads.require(roadId);
+      const other = road.fromFlag === flag.id ? road.toFlag : road.fromFlag;
+      oneRoadAway.add(sim.flags.require(other).point);
+    }
+
+    const held = flag.wares.map((parcel) => parcel.ware);
+    expect(sim.demolishFlag(PLAYER, point).ok).toBe(true);
+
+    for (const ware of held) {
+      const landed = sim.flags
+        .all()
+        .filter((candidate) => candidate.wares.some((parcel) => parcel.ware === ware))
+        .map((candidate) => candidate.point);
+      expect(landed.some((where) => oneRoadAway.has(where))).toBe(true);
+    }
+  });
+});
+
+describe('a flag raised under a walking carrier', () => {
+  it('does not move him', () => {
+    for (const loaded of [false, true]) {
+      const sim = newGame();
+      const hq = headquarters(sim);
+      const info = buildingInfo(BuildingType.Sawmill);
+
+      let far: number | undefined;
+      let furthest = 0;
+      for (const point of sim.world.grid.pointsWithin(hq.point, 9)) {
+        const distance = sim.world.grid.distance(hq.point, point);
+        if (distance <= furthest) continue;
+        const space = evaluateBuildSpace(sim.world, point, PLAYER);
+        if (space === BuildSpace.None || !canHostSize(space, info.size)) continue;
+        furthest = distance;
+        far = point;
+      }
+      expect(sim.placeBuilding(PLAYER, far!, BuildingType.Sawmill).ok).toBe(true);
+      const site = sim.buildings.find((building) => building.point === far)!;
+      expect(
+        sim.placeRoad(PLAYER, planRoad(sim.world, hq.flagPoint, site.flagPoint, PLAYER)!).ok,
+      ).toBe(true);
+      const road = sim.roads.all()[0]!;
+
+      let carrier: ReturnType<typeof sim.settlers.get>;
+      for (let i = 0; i < 4000 && !carrier; i += 1) {
+        sim.update();
+        const candidate = sim.settlers.get(road.carrier);
+        if (
+          candidate &&
+          candidate.stepProgress >= 5 &&
+          candidate.toPoint !== candidate.point &&
+          (candidate.carrying !== null) === loaded
+        ) {
+          carrier = candidate;
+        }
+      }
+      expect(carrier).toBeDefined();
+
+      const spot = road.points.find(
+        (point) =>
+          point !== carrier!.point && point !== carrier!.toPoint && sim.world.flag[point] === 0,
+      );
+      expect(spot).toBeDefined();
+
+      // Dividing the road under him re-routed him from the node behind, which
+      // threw him most of a node backwards.
+      const before = drawnPosition(sim, carrier!);
+      expect(sim.placeFlag(PLAYER, spot!).ok).toBe(true);
+      const after = drawnPosition(sim, carrier!);
+
+      expect(Math.hypot(after.x - before.x, after.y - before.y)).toBeLessThan(0.2);
+    }
+  });
+});
+
+describe('a doorstep that already has a flag', () => {
+  /** A site whose own flag point can take a flag, with the flag already there. */
+  function siteBehindAFlag(sim: Simulation) {
+    const hq = headquarters(sim);
+    for (const point of sim.world.grid.pointsWithin(hq.point, 8)) {
+      if (sim.world.grid.distance(hq.point, point) < 4) continue;
+      if (evaluateBuildSpace(sim.world, point, PLAYER) < BuildSpace.Hut) continue;
+
+      const flagPoint = sim.world.grid.neighbour(point, FLAG_DIRECTION);
+      if (flagPoint === OUT_OF_BOUNDS) continue;
+      if (!sim.placeFlag(PLAYER, flagPoint).ok) continue;
+      return { point, flagPoint };
+    }
+    throw new Error('no site found behind a flag');
+  }
+
+  it('is still offered as a building site', () => {
+    const sim = newGame();
+    const { point } = siteBehindAFlag(sim);
+
+    // The flag a building would use sits on a neighbouring node by
+    // construction, and the no-crowding rule used to disqualify the site for it.
+    expect(evaluateBuildSpace(sim.world, point, PLAYER)).toBeGreaterThanOrEqual(BuildSpace.Hut);
+  });
+
+  it('is used rather than a second flag being raised', () => {
+    const sim = newGame();
+    const { point, flagPoint } = siteBehindAFlag(sim);
+    const flagsBefore = sim.flags.all().length;
+
+    expect(sim.placeBuilding(PLAYER, point, BuildingType.Woodcutter).ok).toBe(true);
+
+    const built = sim.buildings.find((building) => building.point === point)!;
+    expect(built.flagPoint).toBe(flagPoint);
+    expect(sim.flags.all()).toHaveLength(flagsBefore);
+    expect(sim.flags.require(sim.world.flag[flagPoint]!).building).toBe(built.id);
+  });
+
+  it('will not let two buildings share one flag', () => {
+    const sim = newGame();
+    const { point, flagPoint } = siteBehindAFlag(sim);
+    expect(sim.placeBuilding(PLAYER, point, BuildingType.Woodcutter).ok).toBe(true);
+
+    // The node whose own doorstep would be that same flag.
+    expect(evaluateBuildSpace(sim.world, flagPoint, PLAYER)).toBe(BuildSpace.None);
+  });
+});
+
+describe('a reservation for a ware that no longer exists', () => {
+  it('is counted back from the world and let go', () => {
+    const sim = newGame();
+    const id = buildAndConnect(sim, BuildingType.Sawmill)!;
+    expect(id).toBeDefined();
+    run(sim, 400);
+
+    const site = sim.buildings.require(id);
+    expect(site.state).toBe(BuildingState.UnderConstruction);
+
+    // The damage a lost crate used to leave behind: the site goes on counting a
+    // ware that is nowhere in the world. `outstandingDemand` subtracts it, so
+    // the site looks satisfied, nothing more is sent, and it waits for ever —
+    // which is how a player's barracks ended up one stone short.
+    const index = site.incoming.findIndex((_, at) => at >= 0);
+    site.incoming[index] = site.incoming[index]! + 5;
+
+    run(sim, 100);
+
+    // Counted back from the crates and hands that really exist.
+    const ware = buildingInfo(site.type).cost[index]!.ware;
+    let real = 0;
+    sim.flags.forEach((flag) => {
+      real += flag.wares.filter(
+        (parcel) => parcel.destination === site.id && parcel.ware === ware,
+      ).length;
+    });
+    sim.settlers.forEach((settler) => {
+      if (settler.carryDestination === site.id && settler.carrying === ware) real += 1;
+    });
+
+    expect(site.incoming[index]).toBe(real);
+  });
+
 });

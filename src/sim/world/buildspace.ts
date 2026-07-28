@@ -1,4 +1,4 @@
-import { Direction, DIRECTIONS } from '../core/direction';
+import { Direction, DIRECTIONS, opposite } from '../core/direction';
 import { OUT_OF_BOUNDS } from '../core/grid';
 import { MapObject } from './terrain';
 import type { World } from './world';
@@ -79,8 +79,18 @@ function isWellInsideTerritory(world: World, point: number, player: number): boo
  * border is a road built on ground that is only half yours, and it let a player
  * creep outwards without ever claiming anything; expanding now means taking the
  * ground first.
+ *
+ * `ignoreFlagAt` excuses one neighbouring flag from the no-crowding rule. It
+ * exists for a building's own doorstep: the flag a building would use sits on a
+ * neighbouring node by construction, so without this the one flag that makes a
+ * site usable would be the very thing that disqualified it.
  */
-export function canPlaceFlag(world: World, point: number, player: number): boolean {
+export function canPlaceFlag(
+  world: World,
+  point: number,
+  player: number,
+  ignoreFlagAt?: number,
+): boolean {
   if (!isWellInsideTerritory(world, point, player)) return false;
   if (!isPointClear(world, point)) return false;
   if (!world.isWalkable(point)) return false;
@@ -88,6 +98,7 @@ export function canPlaceFlag(world: World, point: number, player: number): boole
   for (const direction of DIRECTIONS) {
     const neighbour = world.grid.neighbour(point, direction);
     if (neighbour === OUT_OF_BOUNDS) continue;
+    if (neighbour === ignoreFlagAt) continue;
     if (world.flag[neighbour] !== 0) return false;
   }
 
@@ -144,29 +155,39 @@ export function evaluateBuildSpace(world: World, point: number, player: number):
   if (!world.isWalkable(point)) return BuildSpace.None;
   if (world.owner[point] !== player) return BuildSpace.None;
 
-  // `canPlaceFlag` now keeps the frontier clear too, so a point on the border
-  // offers nothing at all.
+  // A building needs its own flag on the point to the south-east, and that flag
+  // may already be there — put one down and then build behind it, which is how
+  // a player who has laid his roads first expects to work.
+  const flagPoint = world.grid.neighbour(point, FLAG_DIRECTION);
+  const standing = flagPoint !== OUT_OF_BOUNDS ? world.flag[flagPoint] : 0;
+
+  // `canPlaceFlag` keeps the frontier clear too, so a point on the border offers
+  // nothing at all. A building is judged with its own doorstep excused from the
+  // no-crowding rule; a flag never is, since flags really cannot crowd.
   const flagPossible = canPlaceFlag(world, point, player);
-  if (!flagPossible) return BuildSpace.None;
+  const buildingPossible =
+    standing !== 0 ? canPlaceFlag(world, point, player, flagPoint) : flagPossible;
+  if (!flagPossible && !buildingPossible) return BuildSpace.None;
+
+  // Where only a building is possible, "just a flag" is not an answer.
+  const flagVerdict = flagPossible ? BuildSpace.Flag : BuildSpace.None;
 
   // A road already runs through here. A flag is still welcome — it divides the
   // road in two — but a building would leave carriers walking through its walls.
-  if (world.roadCount(point) > 0) return BuildSpace.Flag;
+  if (world.roadCount(point) > 0) return flagVerdict;
 
   for (const direction of DIRECTIONS) {
     const neighbour = world.grid.neighbour(point, direction);
     if (neighbour === OUT_OF_BOUNDS) continue;
-    if (world.building[neighbour] !== 0) return BuildSpace.Flag;
+    if (world.building[neighbour] !== 0) return flagVerdict;
   }
 
-  // A building needs its own flag on the point to the south-east.
-  const flagPoint = world.grid.neighbour(point, FLAG_DIRECTION);
   const flagUsable =
     flagPoint !== OUT_OF_BOUNDS &&
-    (world.flag[flagPoint] !== 0
-      ? world.owner[flagPoint] === player
+    (standing !== 0
+      ? world.owner[flagPoint] === player && !servesABuilding(world, flagPoint)
       : canPlaceFlag(world, flagPoint, player));
-  if (!flagUsable) return BuildSpace.Flag;
+  if (!flagUsable) return flagVerdict;
 
   world.trianglesAroundPoint(point, AROUND_TRIANGLES);
 
@@ -185,13 +206,25 @@ export function evaluateBuildSpace(world: World, point: number, player: number):
   }
 
   if (allMineable) return BuildSpace.Mine;
-  if (!allBuildable) return BuildSpace.Flag;
+  if (!allBuildable) return flagVerdict;
 
   const slope = world.maxSlopeAround(point);
   if (slope <= SLOPE_LIMIT.castle) return BuildSpace.Castle;
   if (slope <= SLOPE_LIMIT.house) return BuildSpace.House;
   if (slope <= SLOPE_LIMIT.hut) return BuildSpace.Hut;
-  return BuildSpace.Flag;
+  return flagVerdict;
+}
+
+/**
+ * Whether a flag is already the doorstep of a building.
+ *
+ * A building sits on the node opposite its own flag, so one lookup settles it.
+ * Two buildings sharing a flag would leave both their goods on one doorstep and
+ * neither able to tell which were his.
+ */
+function servesABuilding(world: World, flagPoint: number): boolean {
+  const door = world.grid.neighbour(flagPoint, opposite(FLAG_DIRECTION));
+  return door !== OUT_OF_BOUNDS && world.building[door] !== 0;
 }
 
 /** Whether a footprint fits in the space a point offers. */
