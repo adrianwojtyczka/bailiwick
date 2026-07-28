@@ -429,7 +429,7 @@ describe('determinism', () => {
     // deliberately, never reflexively.
     const sim = newGame(4242);
     run(sim, 1000);
-    expect(sim.hash()).toMatchInlineSnapshot(`"1a77ce3f"`);
+    expect(sim.hash()).toMatchInlineSnapshot(`"e72ef3da"`);
   });
 });
 
@@ -2492,5 +2492,292 @@ describe('a carrier walking out to his road', () => {
 
     expect(carriedFirst).toBe(true);
     expect(restedFirst).toBe(false);
+  });
+});
+
+describe('nobody jumps', () => {
+  /** The furthest a settler can be drawn moving in one tick, with slack. */
+  const A_STEP = 0.2;
+
+  it('walks a carrier into his post rather than placing him there', () => {
+    const sim = newGame();
+    const id = buildAndConnect(sim, BuildingType.Woodcutter, MapObject.Tree)!;
+    expect(id).toBeDefined();
+
+    // A stretch whose middle falls between two nodes is where the post sits
+    // half a step out, and where the jump showed.
+    const whole = sim.roads.all()[0]!;
+    [3, 1, 5]
+      .map((index) => whole.points[index])
+      .some((point) => point !== undefined && sim.placeFlag(PLAYER, point).ok);
+    const road = sim.roads.all().find((candidate) => candidate.points.length % 2 === 0);
+    expect(road).toBeDefined();
+
+    let worst = 0;
+    let previous: { x: number; y: number } | undefined;
+    for (let i = 0; i < 6000; i += 1) {
+      sim.update();
+      const carrier = sim.settlers.get(road!.carrier);
+      if (!carrier) {
+        previous = undefined;
+        continue;
+      }
+      const now = drawnPosition(sim, carrier);
+      if (previous) {
+        worst = Math.max(worst, Math.hypot(now.x - previous.x, now.y - previous.y));
+      }
+      previous = now;
+    }
+
+    // Placing him halfway outright moved him half a node in one tick, every
+    // time he got back from a delivery.
+    expect(worst).toBeLessThan(A_STEP);
+  });
+
+  it('turns a dismissed settler for home without snapping him back', () => {
+    const sim = newGame();
+    const hq = headquarters(sim);
+    const info = buildingInfo(BuildingType.Sawmill);
+
+    // As far off as the territory allows, so the road is long enough to split
+    // and its far stretch is not on the store's doorstep — a carrier hired for
+    // that stretch has a real walk out to be interrupted.
+    let point: number | undefined;
+    let furthest = 0;
+    for (const candidate of sim.world.grid.pointsWithin(hq.point, 9)) {
+      const distance = sim.world.grid.distance(hq.point, candidate);
+      if (distance <= furthest) continue;
+      const space = evaluateBuildSpace(sim.world, candidate, PLAYER);
+      if (space === BuildSpace.None || !canHostSize(space, info.size)) continue;
+      furthest = distance;
+      point = candidate;
+    }
+    expect(sim.placeBuilding(PLAYER, point!, BuildingType.Sawmill).ok).toBe(true);
+
+    const site = sim.buildings.find((building) => building.point === point)!;
+    const route = planRoad(sim.world, hq.flagPoint, site.flagPoint, PLAYER);
+    expect(sim.placeRoad(PLAYER, route!).ok).toBe(true);
+
+    const whole = sim.roads.all()[0]!;
+    [2, 3, 1]
+      .map((index) => whole.points[index])
+      .some((point) => point !== undefined && sim.placeFlag(PLAYER, point).ok);
+    const far = sim.roads.all().find((road) => road.points.includes(site.flagPoint))!;
+
+    // Catch him well into a step, where the snap back was largest.
+    let walker: ReturnType<typeof sim.settlers.get>;
+    for (let i = 0; i < 2000 && !walker; i += 1) {
+      sim.update();
+      walker = sim.settlers
+        .all()
+        .find(
+          (settler) =>
+            settler.road === far.id &&
+            settler.state === SettlerState.WalkingToJob &&
+            settler.stepProgress >= 6 &&
+            settler.toPoint !== settler.point,
+        );
+    }
+    expect(walker).toBeDefined();
+
+    const before = drawnPosition(sim, walker!);
+    expect(sim.demolishRoad(PLAYER, far.points[1]!).ok).toBe(true);
+    const after = drawnPosition(sim, walker!);
+
+    // Routing him home from the node behind him threw him three quarters of a
+    // node backwards the instant the road went.
+    expect(Math.hypot(after.x - before.x, after.y - before.y)).toBeLessThan(A_STEP);
+  });
+});
+
+describe('a geologist whose flag is taken away', () => {
+  it('finishes the hole he is digging and then goes home', () => {
+    const sim = newGame();
+    const hq = headquarters(sim);
+    expect(sim.sendGeologist(PLAYER, hq.flagPoint).ok).toBe(true);
+
+    // Wait until he is actually digging.
+    let geologist: ReturnType<typeof sim.settlers.get>;
+    for (let i = 0; i < 4000 && !geologist; i += 1) {
+      sim.update();
+      geologist = sim.settlers
+        .all()
+        .find(
+          (settler) =>
+            settler.profession === Profession.Geologist &&
+            settler.state === SettlerState.PerformingTask,
+        );
+    }
+    expect(geologist).toBeDefined();
+
+    const hole = geologist!.taskPoint;
+    expect(sim.world.resourceKnown[hole]).toBe(0);
+
+    // The headquarters flag cannot be removed, so stand in for the player by
+    // taking the flag off the map the way `demolishFlag` would.
+    sim.world.flag[geologist!.surveyFrom] = 0;
+
+    run(sim, 2000);
+
+    // The hole he had started is reported — his walk out was not wasted — and
+    // he is on his way back rather than digging another.
+    expect(sim.world.resourceKnown[hole]).toBe(1);
+    const still = sim.settlers.get(geologist!.id);
+    if (still === geologist) {
+      expect(geologist!.state).toBe(SettlerState.ReturningToStore);
+    }
+  });
+});
+
+describe('corn', () => {
+  const FARMING_SEED = 726;
+
+  it('ripens field by field rather than all at once', () => {
+    const sim = newGame(FARMING_SEED);
+    const hq = headquarters(sim);
+    const info = buildingInfo(BuildingType.Farm);
+
+    let best: number | undefined;
+    let bestSoil = 0;
+    for (const point of sim.world.grid.pointsWithin(hq.point, 9)) {
+      if (sim.world.grid.distance(hq.point, point) < 3) continue;
+      const space = evaluateBuildSpace(sim.world, point, PLAYER);
+      if (space === BuildSpace.None || !canHostSize(space, info.size)) continue;
+      const soil = sim.world.grid
+        .pointsWithin(point, 2)
+        .filter((near) => sim.world.farmableSides(near) === 6).length;
+      if (soil > bestSoil) {
+        bestSoil = soil;
+        best = point;
+      }
+    }
+    expect(sim.placeBuilding(PLAYER, best!, BuildingType.Farm).ok).toBe(true);
+    const farm = sim.buildings.find((building) => building.point === best)!;
+    const route = planRoad(sim.world, hq.flagPoint, farm.flagPoint, PLAYER);
+    if (route) sim.placeRoad(PLAYER, route);
+
+    // Whether two fields ever ripen on the *same* tick. Sharing one clock they
+    // all step together, which is what read as a single flickering field; on
+    // their own clocks no two nodes in a farm's ring ever come due at once.
+    const ring = sim.world.grid.pointsWithin(farm.point, 6);
+    const stageOf = new Map<number, number>();
+    let mostInOneTick = 0;
+    let sawGrowth = false;
+
+    for (let i = 0; i < 20000; i += 1) {
+      sim.update();
+
+      let ripenedThisTick = 0;
+      for (const point of ring) {
+        const stage =
+          sim.world.object[point] === MapObject.Field ? sim.world.objectData[point]! : -1;
+        const was = stageOf.get(point);
+        if (was !== undefined && stage > was) ripenedThisTick += 1;
+        stageOf.set(point, stage);
+      }
+
+      if (ripenedThisTick > 0) sawGrowth = true;
+      mostInOneTick = Math.max(mostInOneTick, ripenedThisTick);
+    }
+
+    expect(sawGrowth).toBe(true);
+    expect(mostInOneTick).toBe(1);
+  });
+});
+
+describe('a farm with corn on the way', () => {
+  const FARMING_SEED = 726;
+
+  function farmOnGoodSoil(sim: Simulation) {
+    const hq = headquarters(sim);
+    const info = buildingInfo(BuildingType.Farm);
+
+    let best: number | undefined;
+    let bestSoil = 0;
+    for (const point of sim.world.grid.pointsWithin(hq.point, 9)) {
+      if (sim.world.grid.distance(hq.point, point) < 3) continue;
+      const space = evaluateBuildSpace(sim.world, point, PLAYER);
+      if (space === BuildSpace.None || !canHostSize(space, info.size)) continue;
+      const soil = sim.world.grid
+        .pointsWithin(point, 2)
+        .filter((near) => sim.world.farmableSides(near) === 6).length;
+      if (soil > bestSoil) {
+        bestSoil = soil;
+        best = point;
+      }
+    }
+    expect(sim.placeBuilding(PLAYER, best!, BuildingType.Farm).ok).toBe(true);
+    const farm = sim.buildings.find((building) => building.point === best)!;
+    const route = planRoad(sim.world, hq.flagPoint, farm.flagPoint, PLAYER);
+    if (route) sim.placeRoad(PLAYER, route);
+    return farm;
+  }
+
+  it('says nothing while it waits for the crop', () => {
+    const sim = newGame(FARMING_SEED);
+    const farm = farmOnGoodSoil(sim);
+
+    // Long past the point at which a building that had really run out would
+    // have said so. A farmer between jobs is not an exhausted farm.
+    run(sim, 20000);
+
+    expect(sim.world.grid
+      .pointsWithin(farm.point, 6)
+      .some((point) => sim.world.object[point] === MapObject.Field)).toBe(true);
+    expect(sim.events.filter((message) => message.category === 'exhausted')).toHaveLength(0);
+  });
+
+  it('still says so once there is nowhere left to sow', () => {
+    const sim = newGame(FARMING_SEED);
+    const farm = farmOnGoodSoil(sim);
+    run(sim, 3000);
+
+    // Wall the farm in: no corn standing, and every node of its ring built on.
+    for (const point of sim.world.grid.pointsWithin(farm.point, 6)) {
+      if (sim.world.object[point] === MapObject.Field) sim.world.object[point] = MapObject.None;
+      if (sim.world.grid.distance(farm.point, point) === 2) sim.world.building[point] = farm.id;
+    }
+
+    run(sim, 8000);
+    expect(sim.events.filter((message) => message.category === 'exhausted').length).toBeGreaterThan(0);
+  });
+});
+
+describe('the province filling up', () => {
+  it('takes in a settler every thirty seconds', () => {
+    const sim = newGame();
+
+    // When each one arrives, rather than how many: a bare game reaches its
+    // ceiling almost at once, so counting heads measures the cap and not the
+    // pace.
+    const arrivals: number[] = [];
+    let previous = sim.population(PLAYER);
+    for (let i = 0; i < 2000; i += 1) {
+      sim.update();
+      const now = sim.population(PLAYER);
+      if (now > previous) arrivals.push(sim.tick);
+      previous = now;
+    }
+
+    expect(arrivals.length).toBeGreaterThanOrEqual(2);
+    for (let i = 1; i < arrivals.length; i += 1) {
+      // Thirty seconds at five ticks a second.
+      expect(arrivals[i]! - arrivals[i - 1]!).toBe(150);
+    }
+  });
+
+  it('lets each finished building support four more', () => {
+    const sim = newGame();
+    const hq = headquarters(sim);
+
+    // The headquarters alone: thirty-two, plus four for itself.
+    run(sim, 60000);
+    const finished = sim.buildings
+      .all()
+      .filter((building) => building.owner === PLAYER && building.state === BuildingState.Complete)
+      .length;
+
+    expect(sim.population(PLAYER)).toBe(32 + finished * 4);
+    expect(hq.reserve).toBeGreaterThan(0);
   });
 });

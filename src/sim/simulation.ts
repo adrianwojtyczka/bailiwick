@@ -142,11 +142,18 @@ const STARTING_STOCK: readonly { ware: Ware; count: number }[] = [
 
 const STARTING_SETTLERS = 32;
 
-/** How often a new settler turns up at the headquarters. */
-const POPULATION_INTERVAL = 600;
+/**
+ * How often a new settler turns up at the headquarters — every thirty seconds.
+ *
+ * One every two minutes could not keep up with what the player was building:
+ * laying a food chain and opening a mine or two drained the reserve and then
+ * left him waiting on people rather than on materials, which is the wrong thing
+ * for a game about hauling goods to be about.
+ */
+const POPULATION_INTERVAL = 150;
 
 /** How many more people each finished building lets a province support. */
-const SETTLERS_PER_BUILDING = 3;
+const SETTLERS_PER_BUILDING = 4;
 
 /**
  * What a message is about. The category decides how a message is shown and,
@@ -994,14 +1001,19 @@ export class Simulation {
     settler.carryDestination = 0;
     settler.taskTimer = 0;
 
-    const store = this.nearestStore(settler.owner, settler.point);
+    // From the node he is committed to, not the one behind him. A settler
+    // walking out to a road that is torn up under him used to be yanked back to
+    // the node he had just left, which read as a jump across the map.
+    const from = this.committedPoint(settler);
+
+    const store = this.nearestStore(settler.owner, from);
     if (!store) {
       // Nowhere to go home to. Nothing is gained by leaving him standing.
       this.settlers.remove(settler.id);
       return;
     }
 
-    const path = this.pathHome(settler.point, store);
+    const path = this.pathHome(from, store);
     if (!path) {
       // Cut off with no way through: take him in on the spot rather than
       // strand him somewhere he can never walk out of.
@@ -1011,8 +1023,8 @@ export class Simulation {
 
     settler.building = store.id;
     settler.state = SettlerState.ReturningToStore;
-    this.setPath(settler, path);
-    if (path.length === 0) this.arriveAtStore(settler, store);
+    this.redirect(settler, path);
+    if (settler.pathIndex >= settler.path.length) this.arriveAtStore(settler, store);
   }
 
   /**
@@ -1427,6 +1439,14 @@ export class Simulation {
    * candidates only ever shrink and the posting always ends.
    */
   private beginSurvey(settler: Settler): void {
+    // Take the flag away and the posting is over. He is only asked this between
+    // holes, so one already begun is finished and reported first — his walk out
+    // was not wasted, and the player still learns what was under his feet.
+    if (this.world.flag[settler.surveyFrom] === 0) {
+      this.sendHome(settler);
+      return;
+    }
+
     const target = this.surveyTarget(settler.surveyFrom, settler.point);
     const path = target === undefined ? undefined : walkablePath(this.world, settler.point, target);
     if (target === undefined || !path) {
@@ -1776,17 +1796,28 @@ export class Simulation {
    * the stroll wherever it has got to.
    */
   private strollToPost(settler: Settler): void {
-    if (settler.path.length > 0) {
-      this.advance(settler);
+    const road = this.roads.get(settler.road);
+    if (!road) {
+      if (settler.path.length > 0) this.advance(settler);
       return;
     }
 
-    const road = this.roads.get(settler.road);
-    if (!road) return;
-
     const post = this.postOf(road);
-    if (settler.point === post.point) {
-      this.waitAtPost(settler, post);
+
+    // Easing onto a post that lies between two nodes, which has to be settled
+    // before the ordinary advance below: that would carry him the whole step
+    // instead of stopping him halfway along it. Safe to test first because
+    // `strollToPost` only runs when there was no work to be had, so any route
+    // he is on is a stroll of our own making.
+    const arrived = settler.pathIndex >= settler.path.length;
+    const easingIn = settler.fromPoint === post.point && settler.toPoint === post.beyond;
+    if (post.beyond !== undefined && settler.point === post.point && (arrived || easingIn)) {
+      this.waitAtPost(settler, post.point, post.beyond);
+      return;
+    }
+
+    if (settler.path.length > 0) {
+      this.advance(settler);
       return;
     }
 
@@ -1824,14 +1855,26 @@ export class Simulation {
    * node ahead of him and he finishes the half-step into it rather than
    * snapping back.
    */
-  private waitAtPost(settler: Settler, post: { point: number; beyond: number | undefined }): void {
-    if (post.beyond === undefined) return;
+  private waitAtPost(settler: Settler, post: number, beyond: number): void {
+    // Not yet facing the far node: set off towards it properly. Placing him
+    // halfway outright jumped him half a node the instant he got back from a
+    // delivery, which read as a man teleporting off his post.
+    if (settler.fromPoint !== post || settler.toPoint !== beyond) {
+      this.setPath(settler, [beyond]);
+      return;
+    }
 
-    const climb = Math.max(0, this.world.height[post.beyond]! - this.world.height[post.point]!);
-    settler.fromPoint = post.point;
-    settler.toPoint = post.beyond;
-    settler.stepLength = STEP_TICKS + climb * 2;
-    settler.stepProgress = settler.stepLength >> 1;
+    const halfway = settler.stepLength >> 1;
+    if (settler.stepProgress < halfway) {
+      settler.stepProgress += 1;
+      return;
+    }
+
+    // He has arrived. Dropping the route freezes the step exactly where it is,
+    // and an empty route is also what stops `stepFraction` guessing ahead, so
+    // he stands perfectly still instead of twitching.
+    settler.path = [];
+    settler.pathIndex = 0;
   }
 
   private collectWare(settler: Settler): void {
@@ -2263,6 +2306,15 @@ export class Simulation {
     const target = this.workTarget(building.point, behaviour);
 
     if (target === undefined) {
+      // A farm with its whole ring sown and still green has nothing to reap and
+      // nowhere to sow, but there is nothing wrong with it: the corn is coming.
+      // Saying it has run out because the farmer is between jobs was the one
+      // message a working farm should never send.
+      if (behaviour.kind === 'farm' && this.hasField(building.point, behaviour.radius)) {
+        building.status = BuildingStatus.Working;
+        return;
+      }
+
       this.reportExhausted(building);
       return;
     }
@@ -2821,6 +2873,14 @@ export class Simulation {
     return undefined;
   }
 
+  /** Whether any corn stands within reach, ripe or still green. */
+  private hasField(centre: number, radius: number): boolean {
+    for (const point of this.world.grid.pointsWithin(centre, radius)) {
+      if (this.world.object[point] === MapObject.Field) return true;
+    }
+    return false;
+  }
+
   /**
    * The nearest point within `radius` still holding the given resource.
    *
@@ -2948,13 +3008,24 @@ export class Simulation {
     this.growingTrees = stillGrowing;
   }
 
-  /** Corn ripens faster than timber, which is the point of a farm. */
+  /**
+   * Corn ripens faster than timber, which is the point of a farm.
+   *
+   * Every field keeps its own clock, its phase taken from the node it stands
+   * on. Ripening the whole farm on one tick made a field look like a single
+   * flickering thing rather than a crop: corn sown minutes apart jumped a stage
+   * together. Deriving the phase from the point rather than the sowing keeps
+   * this a pure function of the world, with nothing new to save.
+   */
   private growFields(): void {
-    if (this.tick % FIELD_GROWTH_INTERVAL !== 0) return;
-
     const stillGrowing: number[] = [];
     for (const point of this.growingFields) {
       if (this.world.object[point] !== MapObject.Field) continue;
+
+      if ((this.tick + point) % FIELD_GROWTH_INTERVAL !== 0) {
+        stillGrowing.push(point);
+        continue;
+      }
 
       const stage = this.world.objectData[point]! + 1;
       this.world.objectData[point] = Math.min(FIELD_FULLY_GROWN, stage);
