@@ -1144,6 +1144,22 @@ export class Simulation {
       return;
     }
 
+    // Sent back the way he came, he turns where he stands rather than walking
+    // on to the next node to do it. Swapping the two ends of the step and
+    // counting the progress from the other side leaves him drawn in exactly the
+    // same place — `A + (p/L)(B - A)` and `B + ((L - p)/L)(A - B)` are the same
+    // point — so he pivots on the spot instead of jigging forward and back.
+    if (path[0] === settler.fromPoint) {
+      const behind = settler.fromPoint;
+      settler.fromPoint = settler.toPoint;
+      settler.toPoint = behind;
+      settler.point = settler.fromPoint;
+      settler.stepProgress = settler.stepLength - settler.stepProgress;
+      settler.path = path;
+      settler.pathIndex = 0;
+      return;
+    }
+
     settler.path = [settler.toPoint, ...path];
     settler.pathIndex = 0;
   }
@@ -1177,10 +1193,17 @@ export class Simulation {
    * `alpha` is how far the frame falls into the tick still to come. Without it
    * a settler would only move when a tick lands, which at a leisurely pace
    * would read as a stutter rather than a walk.
+   *
+   * It is only ever added to a settler who is *going* somewhere. A carrier
+   * resting midway between two nodes has a step that will never advance, and
+   * guessing ahead for him drew a man twitching a fraction of a node forward
+   * and snapping back five times a second — the whole road appeared to fidget.
    */
   stepFraction(settler: Settler, alpha = 0): number {
     if (settler.stepLength <= 0) return 0;
-    return Math.min(1, (settler.stepProgress + alpha) / settler.stepLength);
+    const walking = settler.pathIndex < settler.path.length;
+    const progress = walking ? settler.stepProgress + alpha : settler.stepProgress;
+    return Math.min(1, progress / settler.stepLength);
   }
 
   // -------------------------------------------------------------- settlers
@@ -2751,21 +2774,32 @@ export class Simulation {
       if (!store) return;
 
       const storeFlag = this.world.flag[store.flagPoint]!;
-      const toStart = roadPointPath(this.network, this.roads, storeFlag, road.fromFlag);
-      if (!toStart) return;
 
-      // Carriers wait in the middle of their stretch, as in the original — the
-      // same post `strollToPost` returns them to, so a man's resting place is
-      // the same whether he has just arrived or just finished a delivery.
-      const post = this.postOf(road);
-      const alongRoad = road.points.slice(1, road.points.indexOf(post.point) + 1);
+      // He joins the road at whichever end is nearer. Walking always to
+      // `fromFlag` — merely the end the road happened to be drawn from — sent
+      // him the length of a road laid the other way round, past the very crate
+      // he was hired to move, only to double back.
+      const ends = [road.fromFlag, road.toFlag]
+        .map((flag) => ({ flag, cost: flag === storeFlag ? 0 : this.network.cost(storeFlag, flag) }))
+        .filter((end): end is { flag: number; cost: number } => end.cost !== undefined)
+        .sort((a, b) => a.cost - b.cost);
+
+      const nearest = ends[0];
+      if (!nearest) return;
+
+      const toRoad = roadPointPath(this.network, this.roads, storeFlag, nearest.flag);
+      if (!toRoad) return;
 
       store.reserve -= 1;
 
+      // He is walked no further than the road itself. From the moment he
+      // arrives he is an ordinary carrier: `lookForWork` runs before
+      // `strollToPost`, so a crate already waiting is picked up at once and the
+      // walk to the middle happens only when there is nothing to carry.
       const settler = this.createSettler(road.owner, Profession.Helper, store.flagPoint);
       settler.road = road.id;
       settler.state = SettlerState.WalkingToJob;
-      this.setPath(settler, [...toStart, ...alongRoad]);
+      this.setPath(settler, toRoad);
       road.carrierRequested = true;
     });
   }

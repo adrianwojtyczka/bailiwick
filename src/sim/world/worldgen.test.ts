@@ -72,21 +72,42 @@ describe('generateWorld', () => {
     const { world, startPoints } = generateWorld(OPTIONS);
 
     for (const point of startPoints) {
-      for (const near of world.grid.pointsWithin(point, 2)) {
+      for (const near of world.grid.pointsWithin(point, 3)) {
         expect(world.object[near]).toBe(MapObject.None);
       }
     }
   });
 
-  const SEEDS = [4242, 726, 99, 11, 1234, 7, 55555, 192792530];
+  it('finds somewhere to settle on every island it makes', () => {
+    // Judging the apron on natural ground rejected whole islands. It is levelled
+    // now instead, so a site is only ever turned down on its own merits.
+    for (const seed of SEEDS) {
+      expect(() => generateWorld({ ...OPTIONS, seed })).not.toThrow();
+    }
+  });
 
-  it('leaves an apron two nodes wide that can actually be built on', () => {
+  it('holds the apron dead level, so nothing on it can be cliff or pond', () => {
+    for (const seed of SEEDS) {
+      const { world, startPoints } = generateWorld({ ...OPTIONS, seed });
+
+      for (const point of startPoints) {
+        const level = world.height[point]!;
+        for (const near of world.grid.pointsWithin(point, 3)) {
+          expect(world.height[near]).toBe(level);
+        }
+      }
+    }
+  });
+
+  const SEEDS = [4242, 726, 99, 11, 1234, 7, 55555, 192792530, 3, 21, 808, 42, 6, 77];
+
+  it('leaves an apron three nodes wide that can actually be built on', () => {
     for (const seed of SEEDS) {
       const { world, startPoints } = generateWorld({ ...OPTIONS, seed });
       world.owner.fill(1);
 
       for (const point of startPoints) {
-        for (const near of world.grid.pointsWithin(point, 2)) {
+        for (const near of world.grid.pointsWithin(point, 3)) {
           // Swept of trees and stone is not enough: a pond or a crag on the
           // doorstep would block the first roads out of the headquarters. Every
           // node in the apron has to take a flag, which is what a road needs.

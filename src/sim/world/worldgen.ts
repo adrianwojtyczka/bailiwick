@@ -37,7 +37,7 @@ const MIN_PLAYER_SEPARATION = 18;
  * could build or lay a road on, so the opening moves are never blocked by a
  * pond or a crag right on the doorstep.
  */
-const START_CLEAR_RADIUS = 2;
+const START_CLEAR_RADIUS = 3;
 
 /**
  * How far a headquarters claims, matching `HEADQUARTERS_RADIUS` in the
@@ -430,13 +430,10 @@ function scoreStartSite(world: World, point: number): number {
   if (world.maxSlopeAround(point) > 1) return -1;
   if (world.object[point] !== MapObject.None) return -1;
 
-  // The apron has to be genuinely usable, not just empty of trees: a pond or a
-  // crag two nodes from the door would block the first roads out of it. There
-  // is no shortage of candidates, so this rules out very few sites.
-  for (const candidate of world.grid.pointsWithin(point, START_CLEAR_RADIUS)) {
-    if (surroundings(world, candidate).buildable < 6) return -1;
-    if (world.maxSlopeAround(candidate) > 1) return -1;
-  }
+  // The apron is not judged here. Demanding that three nodes of natural ground
+  // already be flat and buildable threw away whole islands — two seeds in
+  // sixteen could not be settled at all. `prepareStartArea` levels the apron
+  // instead, which turns a hope into a guarantee and leaves the map varied.
 
   let openGround = 0;
   let trees = 0;
@@ -500,8 +497,20 @@ function prepareStartArea(world: World, point: number): void {
 
   for (const candidate of world.grid.pointsWithin(point, START_FLATTEN_RADIUS)) {
     const distance = world.grid.distance(point, candidate);
-    // Ease back to the natural terrain at the rim so the patch doesn't show.
-    const blend = distance / (START_FLATTEN_RADIUS + 1);
+
+    // The apron itself is held dead level at the door's own altitude. That is
+    // what makes it a guarantee rather than a hope: flat ground at a height the
+    // headquarters can stand on is never water and never cliff, so every node
+    // of it takes a flag once the trees are cleared off. Judging natural ground
+    // instead cost two seeds in sixteen — whole islands with nowhere to settle.
+    if (distance <= START_CLEAR_RADIUS) {
+      world.height[candidate] = level;
+      continue;
+    }
+
+    // Beyond it, ease back to the natural terrain so the patch doesn't show.
+    const reach = START_FLATTEN_RADIUS + 1 - START_CLEAR_RADIUS;
+    const blend = (distance - START_CLEAR_RADIUS) / reach;
     world.height[candidate] = Math.round(world.height[candidate]! * blend + level * (1 - blend));
   }
 

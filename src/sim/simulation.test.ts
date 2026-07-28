@@ -3,6 +3,7 @@ import { BuildingType, buildingInfo } from './data/buildings';
 import { DIRECTIONS } from './core/direction';
 import { Profession } from './data/professions';
 import { Ware } from './data/wares';
+import type { Settler } from './entities/types';
 import { BuildingState, BuildingStatus, FLAG_CAPACITY, SettlerState } from './entities/types';
 import { Simulation } from './simulation';
 import { planRoad } from './transport/pathfinding';
@@ -81,6 +82,23 @@ function buildAndConnect(
   if (route) sim.placeRoad(PLAYER, route);
 
   return building.id;
+}
+
+/**
+ * Where a settler is drawn: the point his step has reached, interpolated the
+ * way the renderer does it.
+ *
+ * The step's two ends and its progress are bookkeeping and may legitimately be
+ * rewritten — turning a man round swaps them — but the position they describe
+ * is what the player sees, and that must never jump.
+ */
+function drawnPosition(sim: Simulation, settler: Settler): { x: number; y: number } {
+  const { grid } = sim.world;
+  const t = sim.stepFraction(settler);
+  return {
+    x: grid.worldX(settler.fromPoint) + (grid.worldX(settler.toPoint) - grid.worldX(settler.fromPoint)) * t,
+    y: grid.worldY(settler.fromPoint) + (grid.worldY(settler.toPoint) - grid.worldY(settler.fromPoint)) * t,
+  };
 }
 
 function run(sim: Simulation, ticks: number): void {
@@ -411,7 +429,7 @@ describe('determinism', () => {
     // deliberately, never reflexively.
     const sim = newGame(4242);
     run(sim, 1000);
-    expect(sim.hash()).toMatchInlineSnapshot(`"477f301f"`);
+    expect(sim.hash()).toMatchInlineSnapshot(`"1a77ce3f"`);
   });
 });
 
@@ -1115,14 +1133,19 @@ describe('the farm', () => {
     const id = buildFarm(sim)!;
     const farm = sim.buildings.require(id);
 
-    // Checked every tick: a field sown against the farmyard would be reaped
-    // again long before the run ended.
+    // Looked at every tick — a field sown against the farmyard would be reaped
+    // again long before the run ended — but gathered rather than asserted as we
+    // go: a quarter of a million assertions costs seconds, a list costs nothing.
+    const wrong: number[] = [];
     for (let i = 0; i < 12000; i += 1) {
       sim.update();
       for (const field of fieldsAround(sim, farm.point)) {
-        expect(sim.world.grid.distance(farm.point, field)).toBe(2);
+        const distance = sim.world.grid.distance(farm.point, field);
+        if (distance !== 2) wrong.push(distance);
       }
     }
+
+    expect(wrong).toEqual([]);
   });
 
   it('never sows two fields side by side, nor one against a wall', () => {
@@ -1130,16 +1153,23 @@ describe('the farm', () => {
     const id = buildFarm(sim)!;
     const farm = sim.buildings.require(id);
 
+    const crowded: string[] = [];
     for (let i = 0; i < 12000; i += 1) {
       sim.update();
       for (const field of fieldsAround(sim, farm.point)) {
         for (const direction of DIRECTIONS) {
           const neighbour = sim.world.grid.neighbour(field, direction);
-          expect(sim.world.object[neighbour]).not.toBe(MapObject.Field);
-          expect(sim.world.building[neighbour]).toBe(0);
+          if (sim.world.object[neighbour] === MapObject.Field) {
+            crowded.push(`field ${field} touches field ${neighbour}`);
+          }
+          if (sim.world.building[neighbour] !== 0) {
+            crowded.push(`field ${field} touches a building at ${neighbour}`);
+          }
         }
       }
     }
+
+    expect(crowded).toEqual([]);
   });
 
   it('works five or six fields at once on open meadow', () => {
@@ -1777,16 +1807,18 @@ describe('a road torn up under a loaded carrier', () => {
     // Caught between two nodes, which is where re-routing used to show: the
     // step was restarted from the node behind him, so he slid backwards a
     // pace before turning.
-    const from = carrier.fromPoint;
-    const to = carrier.toPoint;
-    const progress = carrier.stepProgress;
-    expect(progress).toBeGreaterThan(0);
+    expect(carrier.stepProgress).toBeGreaterThan(0);
 
+    // What must not move is where he is *drawn*. He may well be turned round —
+    // the two ends of a step in flight are swapped when he is sent back the way
+    // he came — and that is invisible precisely because it leaves the point
+    // between them untouched.
+    const before = drawnPosition(sim, carrier);
     expect(sim.demolishRoad(PLAYER, farRoad.points[1]!).ok).toBe(true);
+    const after = drawnPosition(sim, carrier);
 
-    expect(carrier.fromPoint).toBe(from);
-    expect(carrier.toPoint).toBe(to);
-    expect(carrier.stepProgress).toBe(progress);
+    expect(after.x).toBeCloseTo(before.x, 10);
+    expect(after.y).toBeCloseTo(before.y, 10);
 
     // And from there on, one neighbouring node at a time all the way home.
     const walked = [carrier.point, ...followUntilTakenIn(sim, carrier, 400)];
@@ -2306,5 +2338,159 @@ describe('where a carrier waits', () => {
 
     expect(carrier.point).toBe(road.points[(road.points.length - 1) / 2]);
     expect(sim.stepFraction(carrier)).toBe(0);
+  });
+});
+
+describe('a carrier at rest', () => {
+  /** A road split so one stretch has an odd number of steps — no middle node. */
+  function oddStepRoad(sim: Simulation) {
+    const hq = headquarters(sim);
+    const info = buildingInfo(BuildingType.Sawmill);
+
+    let far: number | undefined;
+    let furthest = 0;
+    for (const point of sim.world.grid.pointsWithin(hq.point, 9)) {
+      const distance = sim.world.grid.distance(hq.point, point);
+      if (distance <= furthest) continue;
+      const space = evaluateBuildSpace(sim.world, point, PLAYER);
+      if (space === BuildSpace.None || !canHostSize(space, info.size)) continue;
+      furthest = distance;
+      far = point;
+    }
+    expect(sim.placeBuilding(PLAYER, far!, BuildingType.Sawmill).ok).toBe(true);
+
+    const site = sim.buildings.find((building) => building.point === far)!;
+    const route = planRoad(sim.world, hq.flagPoint, site.flagPoint, PLAYER);
+    expect(sim.placeRoad(PLAYER, route!).ok).toBe(true);
+
+    const whole = sim.roads.all()[0]!;
+    const split = [3, 1, 5]
+      .map((index) => whole.points[index])
+      .find((point) => point !== undefined && sim.placeFlag(PLAYER, point).ok);
+    expect(split).toBeDefined();
+
+    run(sim, 3000);
+
+    const road = sim.roads.all().find((candidate) => candidate.points.length % 2 === 0)!;
+    expect(road).toBeDefined();
+    return road;
+  }
+
+  it('does not twitch while it stands still', () => {
+    const sim = newGame();
+    const road = oddStepRoad(sim);
+    const carrier = sim.settlers.require(road.carrier);
+
+    expect(carrier.state).toBe(SettlerState.CarrierWaiting);
+    expect(carrier.path).toHaveLength(0);
+    expect(carrier.stepProgress).toBeGreaterThan(0);
+
+    // The renderer asks where he is several times between ticks. Guessing ahead
+    // for a man who is not going anywhere slid him a fraction of a node forward
+    // and snapped him back, five times a second, all along the road.
+    const drawn = [0, 0.25, 0.5, 0.75, 0.99].map((alpha) => sim.stepFraction(carrier, alpha));
+    expect(drawn).toEqual([0.5, 0.5, 0.5, 0.5, 0.5]);
+  });
+
+  it('turns on the spot when sent back the way it faces', () => {
+    const sim = newGame();
+    const road = oddStepRoad(sim);
+    const carrier = sim.settlers.require(road.carrier);
+
+    const post = carrier.point;
+    const ahead = carrier.toPoint;
+    const behind = road.points[road.points.indexOf(post) - 1] ?? road.points[road.points.indexOf(post) + 1]!;
+    expect(behind).not.toBe(ahead);
+
+    const before = drawnPosition(sim, carrier);
+
+    // The route a crate on the flag behind him produces. It is worked out from
+    // the node he is facing — that is where his step commits him — so it comes
+    // back through the post before carrying on.
+    const route = [post, behind];
+    (sim as unknown as { redirect(settler: Settler, path: number[]): void }).redirect(carrier, route);
+
+    // He pivots where he stands: same place on screen, now facing the other way,
+    // and no wasted pace forward to turn around in.
+    const after = drawnPosition(sim, carrier);
+    expect(after.x).toBeCloseTo(before.x, 10);
+    expect(after.y).toBeCloseTo(before.y, 10);
+    expect(carrier.toPoint).toBe(post);
+    expect(carrier.path[0]).toBe(post);
+    // No pace wasted going forward first, which is what the jig looked like.
+    expect(carrier.path).not.toContain(ahead);
+  });
+});
+
+describe('a carrier walking out to his road', () => {
+  /** Lays a road drawn from the far end, so `fromFlag` is away from the store. */
+  function roadDrawnBackwards(sim: Simulation) {
+    const hq = headquarters(sim);
+    const info = buildingInfo(BuildingType.Sawmill);
+
+    let far: number | undefined;
+    let furthest = 0;
+    for (const point of sim.world.grid.pointsWithin(hq.point, 9)) {
+      const distance = sim.world.grid.distance(hq.point, point);
+      if (distance <= furthest) continue;
+      const space = evaluateBuildSpace(sim.world, point, PLAYER);
+      if (space === BuildSpace.None || !canHostSize(space, info.size)) continue;
+      furthest = distance;
+      far = point;
+    }
+    expect(sim.placeBuilding(PLAYER, far!, BuildingType.Sawmill).ok).toBe(true);
+
+    const site = sim.buildings.find((building) => building.point === far)!;
+    const route = planRoad(sim.world, site.flagPoint, hq.flagPoint, PLAYER);
+    expect(sim.placeRoad(PLAYER, route!).ok).toBe(true);
+
+    const road = sim.roads.all()[0]!;
+    // Drawn from the site, so the road's own "from" end is the far one.
+    expect(sim.flags.require(road.fromFlag).point).not.toBe(hq.flagPoint);
+    return road;
+  }
+
+  it('joins it at the near end rather than walking its whole length', () => {
+    const sim = newGame();
+    const road = roadDrawnBackwards(sim);
+    const farFlagPoint = sim.flags.require(road.fromFlag).point;
+
+    let carrier: ReturnType<typeof sim.settlers.get>;
+    const walked: number[] = [];
+    for (let i = 0; i < 3000; i += 1) {
+      sim.update();
+      carrier = carrier ?? sim.settlers.all().find((settler) => settler.road === road.id);
+      if (!carrier) continue;
+      if (carrier.state !== SettlerState.WalkingToJob) break;
+      walked.push(carrier.point);
+    }
+
+    expect(carrier).toBeDefined();
+    // `fromFlag` is merely the end the road was drawn from. Walking always to it
+    // marched him the length of the road and back — twelve nodes for a walk that
+    // needs none at all when the store is already at the other end.
+    expect(walked).not.toContain(farFlagPoint);
+  });
+
+  it('picks up a waiting crate before it ever reaches its post', () => {
+    const sim = newGame();
+    const road = roadDrawnBackwards(sim);
+    const middle = road.points[Math.floor(road.points.length / 2)]!;
+
+    // He is an ordinary carrier from the moment he reaches the road, and work
+    // runs ahead of the stroll to the middle — so with a crate already waiting
+    // he should be carrying it before he has ever stood at his post.
+    let restedFirst = false;
+    let carriedFirst = false;
+    for (let i = 0; i < 4000 && !carriedFirst && !restedFirst; i += 1) {
+      sim.update();
+      const carrier = sim.settlers.get(road.carrier);
+      if (!carrier) continue;
+      if (carrier.carrying !== null) carriedFirst = true;
+      else if (carrier.point === middle) restedFirst = true;
+    }
+
+    expect(carriedFirst).toBe(true);
+    expect(restedFirst).toBe(false);
   });
 });
