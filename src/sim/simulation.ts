@@ -106,13 +106,28 @@ const SURVEY_MESSAGE_SPREAD = 3;
 const STORE_DISPATCH_LIMIT = Math.floor(FLAG_CAPACITY / 2);
 
 /**
- * How much further a crate will travel to go round a jam rather than queue for
- * it, in road cost — which is a node a step, plus the climb.
+ * What a queue at a flag adds to the cost of arriving there, in road cost —
+ * which is a node a step, plus the climb.
  *
- * Five or six nodes is far enough to take a parallel road and much too short to
- * wander off across the province.
+ * Goods below `QUEUE_FREE` are free: a store keeps its own flag half full of
+ * outgoing crates as a matter of course, and that is traffic, not congestion.
+ * Above it each waiting crate makes the roads in dearer, so a flag at capacity
+ * prices at six nodes — far enough that a crate will take a parallel road to
+ * avoid it, much too short to send it wandering across the province.
+ *
+ * A ramp rather than a threshold, deliberately. Crates begin to prefer the
+ * quieter way while a queue is merely growing, instead of all piling in until
+ * it is full and then all swinging across at once; and there is no line for the
+ * routing to twitch back and forth over as one crate joins the queue and
+ * another leaves.
  */
-const DETOUR_SLACK = 6;
+const QUEUE_FREE = 5;
+const QUEUE_PRICE = 2;
+
+/** What the goods waiting at a flag add to the cost of routing a crate there. */
+function queueAt(flag: Flag): number {
+  return Math.max(0, flag.wares.length - QUEUE_FREE) * QUEUE_PRICE;
+}
 
 /**
  * How long a building must find nothing before it says so — two full minutes at
@@ -336,7 +351,7 @@ export class Simulation {
     this.world = world;
     this.seed = seed;
     this.rng = new Rng(seed ^ 0x51ed270b);
-    this.network = new FlagNetwork(this.flags, this.roads);
+    this.network = new FlagNetwork(this.flags, this.roads, queueAt);
   }
 
   // ------------------------------------------------------------- creation
@@ -544,6 +559,10 @@ export class Simulation {
   /** Advances the world by one tick. */
   update(): void {
     this.tick += 1;
+
+    // Last tick's queues are last tick's news. Routing is re-priced once, here,
+    // so every decision taken during a tick is taken against the same picture.
+    this.network.invalidateTraffic();
 
     this.updateSettlers();
     this.updateBuildings();
@@ -2338,10 +2357,19 @@ export class Simulation {
   /**
    * The flag a waiting parcel should move to next, if any.
    *
-   * The cheapest hop, unless the flag it leads to is full, in which case a way
-   * round is worth looking for. Where there is none the cheapest hop stands: a
-   * crate nobody will carry is worse than a crate that has to queue, and it is
-   * this answer that makes a carrier pick one up at all.
+   * The cheapest hop in a metric that counts the queues as well as the roads,
+   * so a crate goes round a jam of its own accord, without anybody looking for
+   * a way round. Two things follow from letting the ordinary search do it.
+   *
+   * It cannot loop. A shortest path in a graph of positive weights leaves
+   * strictly less to go at every hop, so a crate can never be handed back to a
+   * flag it has left, nor down a spur and out again. (Queues shift, and the
+   * yardstick with them; hop by hop the price of a jam only bends the route,
+   * and a jam clearing is a jam clearing.)
+   *
+   * And it always answers. A queue makes a road dear, never impassable, so a
+   * crate with nowhere better to go is still handed to the carrier standing in
+   * front of the jam — who picks it up, so its maker's flag is free, and waits.
    */
   private nextFlagFor(flagId: number, parcel: WareParcel): number | undefined {
     const destination = this.buildings.get(parcel.destination);
@@ -2351,64 +2379,7 @@ export class Simulation {
     if (!destinationFlag) return undefined;
     if (destinationFlag === flagId) return undefined;
 
-    const step = this.network.next(flagId, destinationFlag);
-    if (!step) return undefined;
-
-    const ahead = this.flags.get(step.nextFlag);
-    if (!ahead || ahead.wares.length < FLAG_CAPACITY) return step.nextFlag;
-
-    return this.wayRound(flagId, destinationFlag) ?? step.nextFlag;
-  }
-
-  /**
-   * The cheapest flag one road away that has room and still gets the crate
-   * closer to where it is going.
-   *
-   * "Closer" is not a nicety: the remaining cost to the destination is a
-   * positive number that every hop, direct or roundabout, then leaves strictly
-   * smaller, and a crate cannot come back to a flag it has already left. Without
-   * that rule two jammed flags can hand the same crate to one another for ever.
-   * (Moving the destination, by tearing up a road or retargeting the parcel,
-   * moves the yardstick with it — but that is the player's doing and it settles
-   * again at once.)
-   *
-   * Roads run both ways, so one search out from the destination prices every
-   * candidate at once.
-   */
-  private wayRound(flagId: number, destinationFlag: number): number | undefined {
-    const flag = this.flags.get(flagId);
-    if (!flag) return undefined;
-
-    const remaining = this.network.costsFrom(destinationFlag);
-    const here = remaining.get(flagId);
-    if (here === undefined) return undefined;
-
-    let best: number | undefined;
-    let bestCost = Infinity;
-
-    for (const roadId of flag.roads) {
-      const road = this.roads.get(roadId);
-      if (!road) continue;
-
-      const other = road.fromFlag === flagId ? road.toFlag : road.fromFlag;
-      const candidate = this.flags.get(other);
-      if (!candidate || candidate.wares.length >= FLAG_CAPACITY) continue;
-
-      const after = remaining.get(other);
-      if (after === undefined || after >= here) continue;
-
-      // A way round is worth having only while it is still roughly the same
-      // journey. Beyond that the crate is better off queueing.
-      const total = road.cost + after;
-      if (total > here + DETOUR_SLACK) continue;
-
-      if (total < bestCost || (total === bestCost && other < best!)) {
-        bestCost = total;
-        best = other;
-      }
-    }
-
-    return best;
+    return this.network.nextThroughTraffic(flagId, destinationFlag)?.nextFlag;
   }
 
   /** Walks a road's own point list between two points on it. */

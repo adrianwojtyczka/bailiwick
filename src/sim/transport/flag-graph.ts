@@ -91,24 +91,55 @@ class FlagHeap {
  * Searches are cached per flag and thrown away wholesale whenever the topology
  * changes. Roads are undirected, so a single search from a flag serves both as
  * "what does it cost to get there from here" and "which way do I send this".
+ *
+ * There are two metrics. The plain one measures the network as built, and is
+ * what tells a building whether a store can reach it at all. The second adds
+ * the price of the queues standing at the flags along the way, and is what
+ * decides which way to send the next crate: a road into a flag with goods piling
+ * up on it costs more than the same road into an empty one, so the ordinary
+ * search finds the way round a jam without anybody having to look for one.
+ *
+ * Keeping them apart matters. A queue must not make a building look cut off,
+ * and it must not be remembered: the congested metric is thrown away every tick,
+ * while the plain one lasts until the roads themselves change.
  */
 export class FlagNetwork {
   private readonly cache = new Map<number, SearchResult>();
+  private readonly withTraffic = new Map<number, SearchResult>();
 
   constructor(
     private readonly flags: EntityTable<Flag>,
     private readonly roads: EntityTable<Road>,
+    /** What the queue at a flag adds to the cost of arriving there. */
+    private readonly queueAt: (flag: Flag) => number = () => 0,
   ) {}
 
   /** Discards every cached search. Call whenever a road is laid or removed. */
   invalidate(): void {
     this.cache.clear();
+    this.withTraffic.clear();
+  }
+
+  /** Discards only what the queues affect. Call once a tick, as goods move. */
+  invalidateTraffic(): void {
+    this.withTraffic.clear();
   }
 
   /** The next hop from `from` towards `to`, or undefined if unreachable. */
   next(from: number, to: number): RouteStep | undefined {
     if (from === to) return undefined;
     return this.search(to).towardsOrigin.get(from);
+  }
+
+  /**
+   * The next hop from `from` towards `to`, going round the queues.
+   *
+   * Never undefined where `next` is not: a jam makes a road dear, never
+   * impassable, so there is always somewhere to send a crate.
+   */
+  nextThroughTraffic(from: number, to: number): RouteStep | undefined {
+    if (from === to) return undefined;
+    return this.search(to, true).towardsOrigin.get(from);
   }
 
   /** Travel cost between two flags, or undefined if unreachable. */
@@ -122,13 +153,19 @@ export class FlagNetwork {
     return this.search(origin).cost;
   }
 
+  /** The same, counting the queues — what routing actually goes by. */
+  costsThroughTraffic(origin: number): ReadonlyMap<number, number> {
+    return this.search(origin, true).cost;
+  }
+
   /** True when a ware at `from` can eventually reach `to`. */
   reaches(from: number, to: number): boolean {
     return from === to || this.search(from).cost.has(to);
   }
 
-  private search(origin: number): SearchResult {
-    const cached = this.cache.get(origin);
+  private search(origin: number, weighTraffic = false): SearchResult {
+    const store = weighTraffic ? this.withTraffic : this.cache;
+    const cached = store.get(origin);
     if (cached) return cached;
 
     const cost = new Map<number, number>();
@@ -150,6 +187,11 @@ export class FlagNetwork {
         const flag = this.flags.get(entry.flag);
         if (!flag) continue;
 
+        // The search runs outward from the destination, so each edge it relaxes
+        // is travelled the other way: a crate at `other` arrives *here*, and it
+        // is this flag's queue that it has to join.
+        const queue = weighTraffic ? this.queueAt(flag) : 0;
+
         for (const roadId of flag.roads) {
           const road = this.roads.get(roadId);
           if (!road) continue;
@@ -157,7 +199,7 @@ export class FlagNetwork {
           const other = road.fromFlag === entry.flag ? road.toFlag : road.fromFlag;
           if (!this.flags.has(other)) continue;
 
-          const candidate = entry.cost + road.cost;
+          const candidate = entry.cost + road.cost + queue;
           const existing = cost.get(other);
           if (existing !== undefined && existing <= candidate) continue;
 
@@ -170,7 +212,7 @@ export class FlagNetwork {
     }
 
     const result: SearchResult = { cost, towardsOrigin };
-    this.cache.set(origin, result);
+    store.set(origin, result);
     return result;
   }
 }

@@ -4,7 +4,7 @@ import { DIRECTIONS } from './core/direction';
 import { OUT_OF_BOUNDS } from './core/grid';
 import { Profession } from './data/professions';
 import { Ware } from './data/wares';
-import type { Settler } from './entities/types';
+import type { Flag, Settler } from './entities/types';
 import { BuildingState, BuildingStatus, FLAG_CAPACITY, SettlerState } from './entities/types';
 import { Simulation } from './simulation';
 import { planRoad } from './transport/pathfinding';
@@ -3503,11 +3503,12 @@ describe('crates and a jammed flag', () => {
     };
   }
 
-  /** Fills a flag to capacity with crates nobody is coming for. */
-  function jam(flag: { wares: { ware: Ware; destination: number }[] }): void {
-    while (flag.wares.length < FLAG_CAPACITY) {
-      flag.wares.push({ ware: Ware.Stone, destination: 0 });
-    }
+  /** Piles crates nobody is coming for onto a flag, up to `held`. */
+  function queue(sim: Simulation, flag: Flag, held = FLAG_CAPACITY): void {
+    while (flag.wares.length < held) flag.wares.push({ ware: Ware.Stone, destination: 0 });
+    // Routing prices the queues once a tick; say so, rather than tick the whole
+    // world just to have a flag counted.
+    sim.network.invalidateTraffic();
   }
 
   const nextFlag = (sim: Simulation, from: number, parcel: { ware: Ware; destination: number }) =>
@@ -3525,7 +3526,21 @@ describe('crates and a jammed flag', () => {
     // With the road clear it takes the short way, as it always did.
     expect(nextFlag(sim, out.id, parcel)).toBe(near.id);
 
-    jam(near);
+    queue(sim, near);
+    expect(nextFlag(sim, out.id, parcel)).toBe(far.id);
+  });
+
+  it('steers round a queue before it has grown to a jam', () => {
+    const sim = newGame();
+    const { hq, near, out, far } = ring(sim);
+    const parcel = { ware: Ware.Board, destination: hq.id };
+
+    // Six of eight: room still, but goods are visibly piling up. Waiting for
+    // the flag to fill outright had every crate join the queue and then the
+    // whole stream swing across at once; a price that rises with the queue
+    // moves them over as it grows.
+    queue(sim, near, 6);
+    expect(near.wares.length).toBeLessThan(FLAG_CAPACITY);
     expect(nextFlag(sim, out.id, parcel)).toBe(far.id);
   });
 
@@ -3534,40 +3549,50 @@ describe('crates and a jammed flag', () => {
     const { hq, near, out, far } = ring(sim);
     const parcel = { ware: Ware.Board, destination: hq.id };
 
-    jam(near);
-    jam(far);
+    queue(sim, near);
+    queue(sim, far);
 
-    // A guard, not a repair: routing has always answered this way. Answering
-    // "nowhere" instead would leave the crate on the producer's flag and stop
-    // him working, so the congestion rule must never be tempted into it.
-    expect(nextFlag(sim, out.id, parcel)).toBe(near.id);
+    // A queue makes a road dear, never impassable. Answering "nowhere" would
+    // leave the crate on the producer's flag and stop him working, so however
+    // the prices fall a crate must always still be given somewhere to go.
+    expect([near.id, far.id]).toContain(nextFlag(sim, out.id, parcel));
   });
 
   it('never sends a crate back to a flag it has left', () => {
-    const sim = newGame();
-    const { hq, near, out } = ring(sim);
-    const parcel = { ware: Ware.Board, destination: hq.id };
+    // Every arrangement of queues the little ring can hold, including the ones
+    // that make the two ways home cost the same. A crate must reach the store
+    // in every one of them without passing a flag twice: that is the whole of
+    // why it cannot be handed round in circles, and it is worth checking
+    // against the prices rather than against the roads, because the prices are
+    // what routing actually goes by.
+    const held = [0, 4, 6, FLAG_CAPACITY];
 
-    jam(near);
+    for (const onNear of held) {
+      for (const onFar of held) {
+        const sim = newGame();
+        const { hq, near, out, far } = ring(sim);
+        const parcel = { ware: Ware.Board, destination: hq.id };
+        const home = sim.world.flag[hq.flagPoint]!;
 
-    // Another guard. Every hop routing proposes, direct or roundabout, must
-    // leave less of the journey to go: that is the whole of why a crate cannot
-    // be handed round a ring for ever, and a way round that broke it would be
-    // caught here rather than by a player watching a crate go in circles.
-    const remaining = sim.network.costsFrom(sim.world.flag[hq.flagPoint]!);
-    const seen = new Set<number>([out.id]);
-    let at = out.id;
+        queue(sim, near, onNear);
+        queue(sim, far, onFar);
 
-    for (let hop = 0; hop < 10; hop += 1) {
-      const step = nextFlag(sim, at, parcel);
-      if (step === undefined) break;
-      expect(seen.has(step)).toBe(false);
-      expect(remaining.get(step)!).toBeLessThan(remaining.get(at)!);
-      seen.add(step);
-      at = step;
+        const remaining = sim.network.costsThroughTraffic(home);
+        const seen = new Set<number>([out.id]);
+        let at = out.id;
+
+        for (let hop = 0; hop < 10 && at !== home; hop += 1) {
+          const step = nextFlag(sim, at, parcel);
+          expect(step).toBeDefined();
+          expect(seen.has(step!)).toBe(false);
+          expect(remaining.get(step!)!).toBeLessThan(remaining.get(at)!);
+          seen.add(step!);
+          at = step!;
+        }
+
+        expect(at).toBe(home);
+      }
     }
-
-    expect(at).toBe(sim.world.flag[hq.flagPoint]);
   });
 
   it('carries a crate round the jam and into the store', () => {
@@ -3581,7 +3606,7 @@ describe('crates and a jammed flag', () => {
     let wentTheLongWay = false;
     let delivered = false;
     for (let i = 0; i < 1500 && !delivered; i += 1) {
-      jam(near);
+      queue(sim, near);
       sim.update();
       if (far.wares.some((parcel) => parcel.ware === Ware.Board)) wentTheLongWay = true;
       delivered = sim.storedWare(PLAYER, Ware.Board) > before;
@@ -3603,8 +3628,8 @@ describe('crates and a jammed flag', () => {
     // has his flag back and can carry on working.
     let holder: Settler | undefined;
     for (let i = 0; i < 400; i += 1) {
-      jam(near);
-      jam(far);
+      queue(sim, near);
+      queue(sim, far);
       sim.update();
       holder = sim.settlers.all().find((settler) => settler.carrying === Ware.Board) ?? holder;
       if (holder && holder.path.length === 0 && sim.stepFraction(holder) === 0.5) break;
