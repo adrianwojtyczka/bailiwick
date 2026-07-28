@@ -65,6 +65,17 @@ export class World {
   readonly building: Int32Array;
   readonly flag: Int32Array;
 
+  /**
+   * The footprint of the building on the point, 0 for none.
+   *
+   * The ids in `building` say *that* something stands here; the spacing rules
+   * need to know *how big* it is, and they are a function of the world alone —
+   * so the size lives beside the id rather than being looked up in a table the
+   * placement rules cannot see. Derived, and rebuilt from the buildings when a
+   * save is loaded, so it is not written to the save file.
+   */
+  readonly buildingSize: Uint8Array;
+
   constructor(grid: MapGrid) {
     this.grid = grid;
     const size = grid.size;
@@ -81,6 +92,7 @@ export class World {
     this.roads = new Uint8Array(size);
     this.building = new Int32Array(size);
     this.flag = new Int32Array(size);
+    this.buildingSize = new Uint8Array(size);
   }
 
   // ---------------------------------------------------------------- terrain

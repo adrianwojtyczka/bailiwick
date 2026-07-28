@@ -69,6 +69,47 @@ describe('evaluateBuildSpace', () => {
     expect(evaluateBuildSpace(world, centre, PLAYER)).toBe(BuildSpace.Flag);
   });
 
+  describe('the room a neighbour has already claimed', () => {
+    /** Stands a building of `size` exactly `distance` nodes east of centre. */
+    function neighbourAt(size: BuildingSize, distance: number): void {
+      let point = centre;
+      for (let i = 0; i < distance; i += 1) point = world.grid.neighbour(point, Direction.East);
+      expect(world.grid.distance(centre, point)).toBe(distance);
+
+      world.building[point] = 42;
+      world.buildingSize[point] = size;
+    }
+
+    // A building's reach — 1 for a hut or a mine, 2 for a house, 3 for a castle
+    // — binds whoever comes second just as it bound whoever came first.
+    const cases: ReadonlyArray<[string, BuildingSize, number, BuildSpace]> = [
+      ['a castle leaves nothing two nodes away', BuildingSize.Castle, 2, BuildSpace.Flag],
+      ['a castle leaves nothing three nodes away', BuildingSize.Castle, 3, BuildSpace.Flag],
+      ['a castle four nodes away is no bother', BuildingSize.Castle, 4, BuildSpace.Castle],
+      ['a house leaves nothing two nodes away', BuildingSize.House, 2, BuildSpace.Flag],
+      ['a house three nodes away allows a house', BuildingSize.House, 3, BuildSpace.House],
+      ['a hut two nodes away allows a hut', BuildingSize.Hut, 2, BuildSpace.Hut],
+      ['a hut three nodes away allows a house', BuildingSize.Hut, 3, BuildSpace.House],
+      ['a hut four nodes away allows a castle', BuildingSize.Hut, 4, BuildSpace.Castle],
+      ['a mine two nodes away allows a hut', BuildingSize.Mine, 2, BuildSpace.Hut],
+    ];
+
+    for (const [name, size, distance, expected] of cases) {
+      it(name, () => {
+        neighbourAt(size, distance);
+        expect(evaluateBuildSpace(world, centre, PLAYER)).toBe(expected);
+      });
+    }
+
+    it('judges a building of unknown footprint by the site alone', () => {
+      // Nothing in the world says how big it is, so only the candidate's own
+      // rule applies — which is what a hand-built world and every old save get.
+      const point = world.grid.neighbour(world.grid.neighbour(centre, Direction.East), Direction.East);
+      world.building[point] = 42;
+      expect(evaluateBuildSpace(world, centre, PLAYER)).toBe(BuildSpace.Hut);
+    });
+  });
+
   describe('slope', () => {
     it('steps down through the footprints as the ground steepens', () => {
       const neighbour = world.grid.neighbour(centre, Direction.East);

@@ -34,10 +34,10 @@ async function canvasCentre(page: Page): Promise<{ x: number; y: number }> {
  */
 async function tapUntilAccepted(page: Page): Promise<boolean> {
   const centre = await canvasCentre(page);
-  const ticker = page.locator('.hud__ticker');
+  const cancel = page.getByRole('button', { name: 'Cancel' });
 
   const offsets: { dx: number; dy: number }[] = [];
-  for (const radius of [70, 110, 150]) {
+  for (const radius of [70, 110, 150, 190]) {
     for (let step = 0; step < 8; step += 1) {
       const angle = (step / 8) * Math.PI * 2;
       offsets.push({
@@ -52,10 +52,12 @@ async function tapUntilAccepted(page: Page): Promise<boolean> {
     await page.mouse.click(centre.x + offset.dx, centre.y + offset.dy);
     await page.waitForTimeout(120);
 
-    const message = (await ticker.textContent())?.trim() ?? '';
-    const refused =
-      message.includes('cannot') || message.includes('No road') || message.includes('Nothing');
-    if (!refused) return true;
+    // Placing a building leaves build mode, so Cancel disappearing is the one
+    // signal that cannot be misread. Watching the ticker for a refusal instead
+    // was wrong in both directions: it holds the last message until another
+    // replaces it or it ages out, so a success after a refusal read as another
+    // refusal, and a first tap with the ticker still empty read as a success.
+    if (!(await cancel.isVisible())) return true;
   }
 
   return false;
@@ -210,7 +212,7 @@ test('the panel follows the world without re-tapping the node', async ({ page })
   const placeFlag = page.getByRole('button', { name: 'Place a flag' });
 
   let found = false;
-  for (const radius of [70, 110, 150]) {
+  for (const radius of [70, 110, 150, 190, 230]) {
     for (let step = 0; step < 8 && !found; step += 1) {
       const angle = (step / 8) * Math.PI * 2;
       await page.mouse.click(
@@ -252,4 +254,35 @@ test('demolishing asks before it acts', async ({ page }) => {
   // The second press does the deed, and the panel stops describing a building.
   await confirm.click();
   await expect(page.locator('.panel__title')).not.toContainText('Woodcutter');
+});
+
+test('a bare flag comes up on one press', async ({ page }) => {
+  await startNewGame(page);
+
+  const centre = await canvasCentre(page);
+  const panel = page.locator('.panel');
+  const placeFlag = page.getByRole('button', { name: 'Place a flag' });
+
+  let found = false;
+  for (const radius of [70, 110, 150, 190, 230]) {
+    for (let step = 0; step < 8 && !found; step += 1) {
+      const angle = (step / 8) * Math.PI * 2;
+      await page.mouse.click(
+        centre.x + Math.round(Math.cos(angle) * radius),
+        centre.y + Math.round(Math.sin(angle) * radius * 0.62),
+      );
+      await page.waitForTimeout(120);
+      found = await placeFlag.isVisible();
+    }
+    if (found) break;
+  }
+  expect(found).toBe(true);
+  await placeFlag.click();
+  await expect(panel.locator('.panel__title')).toHaveText('Flag');
+
+  // A flag with no building behind it costs nothing to put back, so it goes at
+  // once — no question in the way of every little change to a road network.
+  await page.getByRole('button', { name: 'Remove flag', exact: true }).click();
+  await expect(panel.locator('.panel__title')).not.toHaveText('Flag');
+  await expect(placeFlag).toBeVisible();
 });

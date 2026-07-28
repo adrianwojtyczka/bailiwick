@@ -2301,8 +2301,16 @@ describe('one carrier to a road', () => {
 });
 
 describe('where a carrier waits', () => {
+  /** The split stretch with an even number of points, before anyone walks it. */
+  function evenRoad(sim: Simulation) {
+    splitRoad(sim, 3, 0);
+    const road = sim.roads.all().find((candidate) => candidate.points.length % 2 === 0);
+    expect(road).toBeDefined();
+    return road!;
+  }
+
   /** Lays a long road and splits it, to get stretches of a chosen length. */
-  function splitRoad(sim: Simulation, at: number) {
+  function splitRoad(sim: Simulation, at: number, settle = 3000) {
     const hq = headquarters(sim);
     const info = buildingInfo(BuildingType.Sawmill);
 
@@ -2325,7 +2333,7 @@ describe('where a carrier waits', () => {
 
     const whole = sim.roads.all()[0]!;
     expect(sim.placeFlag(PLAYER, whole.points[at]!).ok).toBe(true);
-    run(sim, 3000);
+    run(sim, settle);
   }
 
   it('stands halfway between two nodes when the stretch has no middle one', () => {
@@ -2355,6 +2363,53 @@ describe('where a carrier waits', () => {
 
     expect(carrier.point).toBe(road.points[(road.points.length - 1) / 2]);
     expect(sim.stepFraction(carrier)).toBe(0);
+  });
+
+  it('comes home to its post without walking through it', () => {
+    const sim = newGame();
+    const road = evenRoad(sim);
+    const { grid } = sim.world;
+
+    // The post is the midpoint of the middle edge, whichever of the two nodes
+    // he ends up standing on.
+    const mid = road.points.length / 2;
+    const postX = (grid.worldX(road.points[mid - 1]!) + grid.worldX(road.points[mid]!)) / 2;
+    const postY = (grid.worldY(road.points[mid - 1]!) + grid.worldY(road.points[mid]!)) / 2;
+
+    // Every unbroken spell of idleness, as a run of distances to the post. A
+    // carrier with nothing to do only ever closes on it, so any rise inside one
+    // run is him having walked past it and turned round.
+    const runs: number[][] = [];
+    let run: number[] = [];
+    for (let i = 0; i < 2000; i += 1) {
+      sim.update();
+
+      const carrier = sim.settlers.get(road.carrier);
+      const idle =
+        carrier && carrier.state === SettlerState.CarrierWaiting && carrier.carrying === null;
+      if (!idle) {
+        if (run.length > 0) runs.push(run);
+        run = [];
+        continue;
+      }
+
+      const at = drawnPosition(sim, carrier);
+      run.push(Math.hypot(at.x - postX, at.y - postY));
+    }
+    if (run.length > 0) runs.push(run);
+
+    // He has to have gone out and come back at least once for this to mean
+    // anything: a carrier who never left is trivially never overshooting.
+    expect(runs.some((spell) => spell[0]! > 1)).toBe(true);
+
+    // Routing him always to the same one of the middle pair marched a man
+    // coming home from the far end straight through the halfway point, onto the
+    // node beyond it, and half a pace back again.
+    for (const spell of runs) {
+      for (let i = 1; i < spell.length; i += 1) {
+        expect(spell[i]).toBeLessThanOrEqual(spell[i - 1]! + 1e-9);
+      }
+    }
   });
 });
 
@@ -3342,6 +3397,29 @@ describe('room to build', () => {
     expect(evaluateBuildSpace(sim.world, point, PLAYER)).toBe(BuildSpace.Castle);
   });
 
+  it('will not put a hut in the room a real castle has claimed', () => {
+    const sim = newGame();
+    const hq = headquarters(sim);
+    expect(buildingInfo(hq.type).size).toBe(BuildingSize.Castle);
+
+    // The headquarters is a castle: it wants three clear nodes about it, and it
+    // wants them from whoever builds next as much as it wanted them itself.
+    for (const point of ring(sim, hq.point, 2)) {
+      expect(evaluateBuildSpace(sim.world, point, PLAYER)).toBeLessThanOrEqual(BuildSpace.Flag);
+      expect(sim.placeBuilding(PLAYER, point, BuildingType.Woodcutter).ok).toBe(false);
+    }
+    for (const point of ring(sim, hq.point, 3)) {
+      expect(evaluateBuildSpace(sim.world, point, PLAYER)).toBeLessThanOrEqual(BuildSpace.Flag);
+    }
+
+    // And four nodes out it stops mattering, or there would be nowhere to start.
+    expect(
+      ring(sim, hq.point, 4).some(
+        (point) => evaluateBuildSpace(sim.world, point, PLAYER) >= BuildSpace.Hut,
+      ),
+    ).toBe(true);
+  });
+
   it('counts a road that has nothing to do with it', () => {
     const sim = newGame();
     const point = clearing(sim);
@@ -3384,5 +3462,172 @@ describe('one forester to one woodcutter', () => {
         .pointsWithin(hut.point, 6)
         .filter((point) => sim.world.object[point] === MapObject.Tree).length,
     ).toBeGreaterThan(0);
+  });
+});
+
+describe('crates and a jammed flag', () => {
+  /**
+   * A ring of four flags — the headquarters and three more — so that every
+   * crate has two ways home and a jam on one of them can be routed around.
+   *
+   * The three nodes are picked from seed 4242's map; each step asserts, so a
+   * change in the terrain says which leg it broke rather than failing obscurely
+   * somewhere in the middle of a run.
+   */
+  function ring(sim: Simulation) {
+    const hq = headquarters(sim);
+    const points = [2598, 2472, 2538];
+    for (const point of points) expect(sim.placeFlag(PLAYER, point).ok).toBe(true);
+
+    const legs: ReadonlyArray<readonly [number, number]> = [
+      [hq.flagPoint, points[0]!],
+      [points[0]!, points[1]!],
+      [points[1]!, points[2]!],
+      [points[2]!, hq.flagPoint],
+    ];
+    for (const [from, to] of legs) {
+      const route = planRoad(sim.world, from, to, PLAYER);
+      expect(route).toBeDefined();
+      expect(sim.placeRoad(PLAYER, route!).ok).toBe(true);
+    }
+
+    const flagAt = (point: number) => sim.flags.require(sim.world.flag[point]!);
+    return {
+      hq,
+      home: flagAt(hq.flagPoint),
+      // `near` and `far` are the two ways round from `out`, which sits opposite
+      // the headquarters and so is two hops from home whichever way it goes.
+      near: flagAt(points[0]!),
+      out: flagAt(points[1]!),
+      far: flagAt(points[2]!),
+    };
+  }
+
+  /** Fills a flag to capacity with crates nobody is coming for. */
+  function jam(flag: { wares: { ware: Ware; destination: number }[] }): void {
+    while (flag.wares.length < FLAG_CAPACITY) {
+      flag.wares.push({ ware: Ware.Stone, destination: 0 });
+    }
+  }
+
+  const nextFlag = (sim: Simulation, from: number, parcel: { ware: Ware; destination: number }) =>
+    (
+      sim as unknown as {
+        nextFlagFor(flagId: number, parcel: { ware: Ware; destination: number }): number | undefined;
+      }
+    ).nextFlagFor(from, parcel);
+
+  it('sends a crate the long way round a flag that is full', () => {
+    const sim = newGame();
+    const { hq, near, out, far } = ring(sim);
+    const parcel = { ware: Ware.Board, destination: hq.id };
+
+    // With the road clear it takes the short way, as it always did.
+    expect(nextFlag(sim, out.id, parcel)).toBe(near.id);
+
+    jam(near);
+    expect(nextFlag(sim, out.id, parcel)).toBe(far.id);
+  });
+
+  it('keeps to the jammed way when there is no other', () => {
+    const sim = newGame();
+    const { hq, near, out, far } = ring(sim);
+    const parcel = { ware: Ware.Board, destination: hq.id };
+
+    jam(near);
+    jam(far);
+
+    // A guard, not a repair: routing has always answered this way. Answering
+    // "nowhere" instead would leave the crate on the producer's flag and stop
+    // him working, so the congestion rule must never be tempted into it.
+    expect(nextFlag(sim, out.id, parcel)).toBe(near.id);
+  });
+
+  it('never sends a crate back to a flag it has left', () => {
+    const sim = newGame();
+    const { hq, near, out } = ring(sim);
+    const parcel = { ware: Ware.Board, destination: hq.id };
+
+    jam(near);
+
+    // Another guard. Every hop routing proposes, direct or roundabout, must
+    // leave less of the journey to go: that is the whole of why a crate cannot
+    // be handed round a ring for ever, and a way round that broke it would be
+    // caught here rather than by a player watching a crate go in circles.
+    const remaining = sim.network.costsFrom(sim.world.flag[hq.flagPoint]!);
+    const seen = new Set<number>([out.id]);
+    let at = out.id;
+
+    for (let hop = 0; hop < 10; hop += 1) {
+      const step = nextFlag(sim, at, parcel);
+      if (step === undefined) break;
+      expect(seen.has(step)).toBe(false);
+      expect(remaining.get(step)!).toBeLessThan(remaining.get(at)!);
+      seen.add(step);
+      at = step;
+    }
+
+    expect(at).toBe(sim.world.flag[hq.flagPoint]);
+  });
+
+  it('carries a crate round the jam and into the store', () => {
+    const sim = newGame();
+    const { hq, near, out, far } = ring(sim);
+    run(sim, 1500);
+
+    out.wares.push({ ware: Ware.Board, destination: hq.id });
+    const before = sim.storedWare(PLAYER, Ware.Board);
+
+    let wentTheLongWay = false;
+    let delivered = false;
+    for (let i = 0; i < 1500 && !delivered; i += 1) {
+      jam(near);
+      sim.update();
+      if (far.wares.some((parcel) => parcel.ware === Ware.Board)) wentTheLongWay = true;
+      delivered = sim.storedWare(PLAYER, Ware.Board) > before;
+    }
+
+    expect(delivered).toBe(true);
+    expect(wentTheLongWay).toBe(true);
+  });
+
+  it('picks a crate up anyway and waits mid-road for a way in', () => {
+    const sim = newGame();
+    const { hq, near, out, far } = ring(sim);
+    run(sim, 1500);
+
+    out.wares.push({ ware: Ware.Board, destination: hq.id });
+
+    // Both ways home are full and neither has anything to trade back, so there
+    // is nothing for it but to wait — holding the crate, so that whoever made it
+    // has his flag back and can carry on working.
+    let holder: Settler | undefined;
+    for (let i = 0; i < 400; i += 1) {
+      jam(near);
+      jam(far);
+      sim.update();
+      holder = sim.settlers.all().find((settler) => settler.carrying === Ware.Board) ?? holder;
+      if (holder && holder.path.length === 0 && sim.stepFraction(holder) === 0.5) break;
+    }
+
+    expect(holder).toBeDefined();
+    expect(holder!.carrying).toBe(Ware.Board);
+    expect(out.wares.some((parcel) => parcel.ware === Ware.Board)).toBe(false);
+
+    // He waits at his post, in the middle of his own stretch, rather than
+    // crowding onto a flag that has no room for him.
+    const road = sim.roads.require(holder!.road);
+    expect(road.points.length % 2).toBe(0);
+    const middle = road.points.length / 2;
+    const ends = [holder!.point, holder!.toPoint].sort((a, b) => a - b);
+    expect(ends).toEqual([road.points[middle - 1]!, road.points[middle]!].sort((a, b) => a - b));
+    expect(sim.stepFraction(holder!)).toBe(0.5);
+
+    // And the moment there is room he finishes the delivery.
+    const before = sim.storedWare(PLAYER, Ware.Board);
+    near.wares.length = 0;
+    far.wares.length = 0;
+    run(sim, 300);
+    expect(sim.storedWare(PLAYER, Ware.Board)).toBeGreaterThan(before);
   });
 });

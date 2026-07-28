@@ -106,6 +106,15 @@ const SURVEY_MESSAGE_SPREAD = 3;
 const STORE_DISPATCH_LIMIT = Math.floor(FLAG_CAPACITY / 2);
 
 /**
+ * How much further a crate will travel to go round a jam rather than queue for
+ * it, in road cost — which is a node a step, plus the climb.
+ *
+ * Five or six nodes is far enough to take a parallel road and much too short to
+ * wander off across the province.
+ */
+const DETOUR_SLACK = 6;
+
+/**
  * How long a building must find nothing before it says so — two full minutes at
  * five ticks a second. Short of that it is simply between trips.
  */
@@ -744,6 +753,9 @@ export class Simulation {
     }));
 
     this.world.building[point] = building.id;
+    // Its footprint goes on the map beside its id, so the spacing rules can ask
+    // how much room the neighbours need without a table to look it up in.
+    this.world.buildingSize[point] = info.size;
 
     const flag = this.flags.require(this.world.flag[flagPoint]!);
     flag.building = building.id;
@@ -777,6 +789,7 @@ export class Simulation {
   private destroyBuilding(building: Building): void {
     // Anything in the building's own stores is simply lost, as in the original.
     this.world.building[building.point] = 0;
+    this.world.buildingSize[building.point] = 0;
 
     const flagId = this.world.flag[building.flagPoint];
     if (flagId) {
@@ -1358,7 +1371,7 @@ export class Simulation {
         return;
 
       case SettlerState.CarrierDelivering:
-        if (this.advance(settler)) this.deliverWare(settler);
+        this.carryOn(settler);
         return;
 
       case SettlerState.CarrierWaiting:
@@ -1909,7 +1922,10 @@ export class Simulation {
       return;
     }
 
-    const post = this.postOf(road);
+    // Oriented on the node he last stood on, so a man coming home from the far
+    // flag stops at the near side of the middle edge instead of walking through
+    // the halfway point onto the node beyond it and stepping back.
+    const post = this.postOf(road, settler.point);
 
     // Easing onto a post that lies between two nodes, which has to be settled
     // before the ordinary advance below: that would carry him the whole step
@@ -1945,11 +1961,23 @@ export class Simulation {
    * on it. One of an odd number does not — two flags three nodes apart put the
    * centre *between* the middle pair — and posting him on either node would
    * leave him visibly hugging one flag. He waits between them instead.
+   *
+   * Which of that middle pair he stands on and which he faces is decided by
+   * `from`, the node he is coming from: he takes the near one and looks across
+   * at the other. Either way he is drawn on the midpoint of the same edge, so
+   * this moves nobody's post — it only stops him marching through it and
+   * turning round.
    */
-  private postOf(road: Road): { point: number; beyond: number | undefined } {
+  private postOf(road: Road, from?: number): { point: number; beyond: number | undefined } {
     const count = road.points.length;
     if (count % 2 === 1) return { point: road.points[count >> 1]!, beyond: undefined };
-    return { point: road.points[count / 2 - 1]!, beyond: road.points[count / 2]! };
+
+    const near = road.points[count / 2 - 1]!;
+    const far = road.points[count / 2]!;
+    if (from !== undefined && road.points.indexOf(from) >= count / 2) {
+      return { point: far, beyond: near };
+    }
+    return { point: near, beyond: far };
   }
 
   /**
@@ -2016,6 +2044,87 @@ export class Simulation {
     settler.taskPoint = other;
     this.setPath(settler, path ?? []);
     if ((path?.length ?? 0) === 0) this.deliverWare(settler);
+  }
+
+  /**
+   * A carrier with a crate in his hands, walking it to the far flag.
+   *
+   * While that flag is full and has nothing to trade him he stops at his post,
+   * in the middle of his own stretch, and stands there holding it. He took the
+   * crate off the producer's flag all the same, which is what lets the producer
+   * carry on working; and he waits where he does not add to the crowd at a flag
+   * that already has more than it can hold.
+   *
+   * He only holds if he has not yet passed the middle. A man who has is nearer
+   * the flag than his post, and sending him back to it every time the queue
+   * shortened and lengthened again would have him pacing the road; he goes on
+   * and waits at the flag, as he always did.
+   */
+  private carryOn(settler: Settler): void {
+    const road = this.roads.get(settler.road);
+    const flag = this.flags.get(settler.taskPoint);
+
+    if (road && flag && !this.pastTheMiddle(settler, road, flag) && this.mustWaitFor(settler, flag)) {
+      // `strollToPost` walks whatever route it finds him on, and his is the
+      // delivery — so the delivery has to be dropped first, without disturbing
+      // the pace he is in the middle of. Only once: from the next tick his
+      // route is the stroll itself, which ends at his post and not at the flag.
+      if (settler.path[settler.path.length - 1] === flag.point) this.haltWhereHeStands(settler);
+      this.strollToPost(settler);
+      return;
+    }
+
+    // Coming off a wait with the way clear again: pick the road back up.
+    if (road && flag && settler.path.length === 0) {
+      const from = this.committedPoint(settler);
+      if (from !== flag.point) {
+        const path = this.pathAlongRoad(road, from, flag.point);
+        if (path && path.length > 0) this.redirect(settler, path);
+      }
+    }
+
+    if (this.advance(settler)) this.deliverWare(settler);
+  }
+
+  /**
+   * Whether a carrier is already nearer the flag he is bound for than his post.
+   *
+   * Measured from the node he last stood on rather than the one he is stepping
+   * onto: a post between two nodes is reached in the middle of a step, and
+   * counting him as arrived at the far node would carry him straight past it.
+   */
+  private pastTheMiddle(settler: Settler, road: Road, flag: Flag): boolean {
+    const target = road.points.indexOf(flag.point);
+    const here = road.points.indexOf(settler.point);
+    if (target < 0 || here < 0) return true;
+
+    const middle = (road.points.length - 1) / 2;
+    return target === 0 ? here < middle : here > middle;
+  }
+
+  /**
+   * Whether the flag ahead has no room for what he is carrying and nothing to
+   * trade him for it.
+   *
+   * A crate for the building behind the flag never needs room on it, and a
+   * crate on the flag that wants to go back the way he came is a straight swap
+   * — the exchange that keeps a full flag from deadlocking. Either way he walks
+   * on; only an honestly, uselessly full flag makes him wait.
+   */
+  private mustWaitFor(settler: Settler, flag: Flag): boolean {
+    if (settler.carrying === null) return false;
+    if (flag.wares.length < FLAG_CAPACITY) return false;
+
+    if (flag.building !== 0 && flag.building === settler.carryDestination) {
+      const building = this.buildings.get(flag.building);
+      if (building && willAccept(building, settler.carrying)) return false;
+    }
+
+    const road = this.roads.get(settler.road);
+    if (!road) return false;
+
+    const beyond = road.fromFlag === flag.id ? road.toFlag : road.fromFlag;
+    return !flag.wares.some((waiting) => this.nextFlagFor(flag.id, waiting) === beyond);
   }
 
   private deliverWare(settler: Settler): void {
@@ -2226,7 +2335,14 @@ export class Simulation {
     });
   }
 
-  /** The flag a waiting parcel should move to next, if any. */
+  /**
+   * The flag a waiting parcel should move to next, if any.
+   *
+   * The cheapest hop, unless the flag it leads to is full, in which case a way
+   * round is worth looking for. Where there is none the cheapest hop stands: a
+   * crate nobody will carry is worse than a crate that has to queue, and it is
+   * this answer that makes a carrier pick one up at all.
+   */
   private nextFlagFor(flagId: number, parcel: WareParcel): number | undefined {
     const destination = this.buildings.get(parcel.destination);
     if (!destination) return undefined;
@@ -2235,7 +2351,64 @@ export class Simulation {
     if (!destinationFlag) return undefined;
     if (destinationFlag === flagId) return undefined;
 
-    return this.network.next(flagId, destinationFlag)?.nextFlag;
+    const step = this.network.next(flagId, destinationFlag);
+    if (!step) return undefined;
+
+    const ahead = this.flags.get(step.nextFlag);
+    if (!ahead || ahead.wares.length < FLAG_CAPACITY) return step.nextFlag;
+
+    return this.wayRound(flagId, destinationFlag) ?? step.nextFlag;
+  }
+
+  /**
+   * The cheapest flag one road away that has room and still gets the crate
+   * closer to where it is going.
+   *
+   * "Closer" is not a nicety: the remaining cost to the destination is a
+   * positive number that every hop, direct or roundabout, then leaves strictly
+   * smaller, and a crate cannot come back to a flag it has already left. Without
+   * that rule two jammed flags can hand the same crate to one another for ever.
+   * (Moving the destination, by tearing up a road or retargeting the parcel,
+   * moves the yardstick with it — but that is the player's doing and it settles
+   * again at once.)
+   *
+   * Roads run both ways, so one search out from the destination prices every
+   * candidate at once.
+   */
+  private wayRound(flagId: number, destinationFlag: number): number | undefined {
+    const flag = this.flags.get(flagId);
+    if (!flag) return undefined;
+
+    const remaining = this.network.costsFrom(destinationFlag);
+    const here = remaining.get(flagId);
+    if (here === undefined) return undefined;
+
+    let best: number | undefined;
+    let bestCost = Infinity;
+
+    for (const roadId of flag.roads) {
+      const road = this.roads.get(roadId);
+      if (!road) continue;
+
+      const other = road.fromFlag === flagId ? road.toFlag : road.fromFlag;
+      const candidate = this.flags.get(other);
+      if (!candidate || candidate.wares.length >= FLAG_CAPACITY) continue;
+
+      const after = remaining.get(other);
+      if (after === undefined || after >= here) continue;
+
+      // A way round is worth having only while it is still roughly the same
+      // journey. Beyond that the crate is better off queueing.
+      const total = road.cost + after;
+      if (total > here + DETOUR_SLACK) continue;
+
+      if (total < bestCost || (total === bestCost && other < best!)) {
+        bestCost = total;
+        best = other;
+      }
+    }
+
+    return best;
   }
 
   /** Walks a road's own point list between two points on it. */
@@ -3293,6 +3466,11 @@ export class Simulation {
       snapshot.buildings.pool,
       snapshot.buildings.items.map((b) => ({ ...b, exhaustedFor: b.exhaustedFor ?? 0 })),
     );
+    // Footprints are derived, so no save carries them: rebuild them from the
+    // buildings themselves, and every save ever written gains the spacing rules.
+    simulation.buildings.forEach((building) => {
+      world.buildingSize[building.point] = buildingInfo(building.type).size;
+    });
     // Version 1 settlers have no survey counter; nobody in such a save is a
     // geologist, so nought is not merely a safe default but the right one.
     simulation.settlers.adopt(

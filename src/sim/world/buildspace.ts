@@ -34,6 +34,25 @@ export const BuildingSize = {
 export type BuildingSize = (typeof BuildingSize)[keyof typeof BuildingSize];
 
 /**
+ * How far a footprint pushes everything else away: nothing may be built within
+ * this many nodes of it.
+ *
+ * The rule reads the same from either side, which is the point. A hut two nodes
+ * from a castle satisfies the hut's own reach and breaks the castle's, and it is
+ * just as illegal as putting the castle down second would be.
+ */
+const REACH: Readonly<Record<BuildingSize, number>> = {
+  [BuildingSize.Hut]: 1,
+  [BuildingSize.House]: 2,
+  [BuildingSize.Castle]: 3,
+  [BuildingSize.Mine]: 1,
+};
+
+export function reachOf(size: BuildingSize): number {
+  return REACH[size] ?? 1;
+}
+
+/**
  * Steepest neighbouring height difference each footprint tolerates. Big
  * buildings need level ground; a hut can perch on a slope.
  */
@@ -234,13 +253,21 @@ export function evaluateBuildSpace(world: World, point: number, player: number):
  *  - a **castle** wants both of the first two rings clear of buildings, flags,
  *    trees and stone, and no building in the third.
  *
+ * Every building already standing asks the same of this site in return, by its
+ * own `reachOf`: a neighbour whose footprint reaches this far leaves no room at
+ * all here, however modest the thing being put up. Without that a hut could be
+ * dropped two nodes from a castle — legal by the hut's rule, and quietly
+ * breaking the castle's.
+ *
  * The site's own doorstep is excused throughout — the flag a building uses
  * stands in its first ring by construction — and so is the road that runs into
  * that flag, which is the only road with any business being there.
  *
- * Rings are checked outward and the answer falls as soon as one is spoiled, so
- * a crowded spot costs six lookups. That matters: this runs for every visible
- * node while the build overlay is up.
+ * A neighbouring building settles it in six lookups, which is the common case
+ * near anything already built. Otherwise the rings are walked outward, and only
+ * the verdict falls: a spoiled first ring no longer ends the scan, since a
+ * castle further out can still veto the site outright. This runs for every
+ * visible node while the build overlay is up.
  */
 function largestBySpacing(world: World, point: number, flagPoint: number): BuildSpace {
   const { grid } = world;
@@ -251,26 +278,39 @@ function largestBySpacing(world: World, point: number, flagPoint: number): Build
     if (world.building[neighbour] !== 0) return BuildSpace.None;
   }
 
+  let largest: BuildSpace = BuildSpace.Castle;
+
   for (const neighbour of ringAt(world, point, 1)) {
     if (neighbour === flagPoint) continue;
-    if (!isBareGround(world, neighbour)) return BuildSpace.Hut;
-    if (world.roadCount(neighbour) > 0 && !runsIntoTheFlag(world, neighbour, flagPoint)) {
-      return BuildSpace.Hut;
+    if (!isBareGround(world, neighbour)) largest = BuildSpace.Hut;
+    else if (world.roadCount(neighbour) > 0 && !runsIntoTheFlag(world, neighbour, flagPoint)) {
+      largest = BuildSpace.Hut;
     }
   }
-  for (const further of ringAt(world, point, 2)) {
-    if (world.building[further] !== 0) return BuildSpace.Hut;
-  }
 
   for (const further of ringAt(world, point, 2)) {
+    if (world.building[further] !== 0) {
+      if (withinReach(world, further, 2)) return BuildSpace.None;
+      largest = BuildSpace.Hut;
+      continue;
+    }
     if (further === flagPoint) continue;
-    if (!isBareGround(world, further)) return BuildSpace.House;
-  }
-  for (const beyond of ringAt(world, point, 3)) {
-    if (world.building[beyond] !== 0) return BuildSpace.House;
+    if (largest > BuildSpace.House && !isBareGround(world, further)) largest = BuildSpace.House;
   }
 
-  return BuildSpace.Castle;
+  for (const beyond of ringAt(world, point, 3)) {
+    if (world.building[beyond] === 0) continue;
+    if (withinReach(world, beyond, 3)) return BuildSpace.None;
+    if (largest > BuildSpace.House) largest = BuildSpace.House;
+  }
+
+  return largest;
+}
+
+/** Whether the building standing on `point` claims the ground `distance` away. */
+function withinReach(world: World, point: number, distance: number): boolean {
+  const size = world.buildingSize[point];
+  return size !== undefined && size !== 0 && reachOf(size as BuildingSize) >= distance;
 }
 
 /** The nodes exactly `distance` steps from a point. */

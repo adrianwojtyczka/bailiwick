@@ -524,11 +524,13 @@ export class Hud {
       button('Send a geologist', 'panel__action', () => this.callbacks.sendGeologist(point)),
     ];
 
-    // A flag serving a building takes the building with it, so it asks the
-    // same question the Demolish button does.
+    // A flag serving a building takes the building with it, so it asks the same
+    // question the Demolish button does. A bare flag is put straight back if it
+    // was a mistake, and a question in the way of every little adjustment to a
+    // road network is worse than the mistake.
     children.push(
       flag.building === 0
-        ? this.dangerousAction(`flag:${flagId}`, 'Remove flag', 'Really remove?', () =>
+        ? button('Remove flag', 'panel__action panel__action--danger', () =>
             this.callbacks.demolishFlag(point),
           )
         : this.dangerousAction(
