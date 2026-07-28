@@ -16,7 +16,14 @@ import {
   evaluateBuildSpace,
   FLAG_DIRECTION,
 } from './world/buildspace';
-import { FIELD_FULLY_GROWN, MapObject, Resource, Terrain } from './world/terrain';
+import {
+  FIELD_FULLY_GROWN,
+  FIELD_MAX_GROWTH,
+  MapObject,
+  Resource,
+  Terrain,
+  TREE_MAX_GROWTH,
+} from './world/terrain';
 
 const PLAYER = 1;
 
@@ -38,6 +45,7 @@ function siteFor(
   sim: Simulation,
   type: BuildingType,
   prefers: MapObject | null = null,
+  near?: number,
 ): number | undefined {
   const info = buildingInfo(type);
   const hq = headquarters(sim);
@@ -54,8 +62,11 @@ function siteFor(
     if (prefers !== null) {
       score = sim.world.grid
         .pointsWithin(point, 6)
-        .filter((near) => sim.world.object[near] === prefers).length;
+        .filter((candidate) => sim.world.object[candidate] === prefers).length;
     }
+    // A forester is only any use to a woodcutter he can reach, so where a
+    // building has to sit beside another, closeness is the whole score.
+    if (near !== undefined) score = 100 - sim.world.grid.distance(near, point);
     if (score > bestScore) {
       bestScore = score;
       best = point;
@@ -70,8 +81,9 @@ function buildAndConnect(
   sim: Simulation,
   type: BuildingType,
   prefers: MapObject | null = null,
+  near?: number,
 ): number | undefined {
-  const point = siteFor(sim, type, prefers);
+  const point = siteFor(sim, type, prefers, near);
   if (point === undefined) return undefined;
 
   const placed = sim.placeBuilding(PLAYER, point, type);
@@ -348,8 +360,11 @@ describe('the wood chain', () => {
     // carrier always favoured the same end of that road, the outbound boards
     // would queue until the flag filled and the stretch would jam for good.
     const sim = newGame();
-    buildAndConnect(sim, BuildingType.Woodcutter, MapObject.Tree);
-    buildAndConnect(sim, BuildingType.Forester);
+    const cutter = buildAndConnect(sim, BuildingType.Woodcutter, MapObject.Tree)!;
+    // Beside the woodcutter: a forester plants within four nodes and a
+    // woodcutter cuts within six, so one dropped anywhere replants a wood
+    // nobody works.
+    buildAndConnect(sim, BuildingType.Forester, null, sim.buildings.require(cutter).point);
     buildAndConnect(sim, BuildingType.Sawmill);
     run(sim, 8000);
 
@@ -431,7 +446,7 @@ describe('determinism', () => {
     // deliberately, never reflexively.
     const sim = newGame(4242);
     run(sim, 1000);
-    expect(sim.hash()).toMatchInlineSnapshot(`"e72ef3da"`);
+    expect(sim.hash()).toMatchInlineSnapshot(`"d67087aa"`);
   });
 });
 
@@ -2674,7 +2689,10 @@ describe('corn', () => {
         const stage =
           sim.world.object[point] === MapObject.Field ? sim.world.objectData[point]! : -1;
         const was = stageOf.get(point);
-        if (was !== undefined && stage > was) ripenedThisTick += 1;
+        // Only a field that was already standing counts. Sowing takes a node
+        // from nothing (-1) to stage zero, which is not ripening — counting it
+        // made two fields sown in one tick look like two ripening together.
+        if (was !== undefined && was >= 0 && stage > was) ripenedThisTick += 1;
         stageOf.set(point, stage);
       }
 
@@ -3079,4 +3097,292 @@ describe('a reservation for a ware that no longer exists', () => {
     expect(site.incoming[index]).toBe(real);
   });
 
+});
+
+describe('a wood coming on', () => {
+  it('grows tree by tree rather than all at once', () => {
+    const sim = newGame();
+    const id = buildAndConnect(sim, BuildingType.Forester)!;
+    expect(id).toBeDefined();
+    const hut = sim.buildings.require(id);
+
+    const around = sim.world.grid.pointsWithin(hut.point, 6);
+    const stageOf = new Map<number, number>();
+    let mostInOneTick = 0;
+    let sawGrowth = false;
+
+    for (let i = 0; i < 20000; i += 1) {
+      sim.update();
+
+      let grewThisTick = 0;
+      for (const point of around) {
+        const stage = sim.world.object[point] === MapObject.Tree ? sim.world.objectData[point]! : -1;
+        const was = stageOf.get(point);
+        // Only a tree that was already standing counts; planting is not growth.
+        if (was !== undefined && was >= 0 && stage > was) grewThisTick += 1;
+        stageOf.set(point, stage);
+      }
+
+      if (grewThisTick > 0) sawGrowth = true;
+      mostInOneTick = Math.max(mostInOneTick, grewThisTick);
+    }
+
+    expect(sawGrowth).toBe(true);
+    expect(mostInOneTick).toBe(1);
+  });
+});
+
+describe('waiting for ripeness', () => {
+  /**
+   * The last growth stage a node was seen at before whatever stood there was
+   * taken away. Nothing may be harvested below its fully grown stage — there is
+   * a whole growth interval between looking ready and being ready.
+   */
+  function stagesAtHarvest(sim: Simulation, centre: number, object: MapObject): number[] {
+    const around = sim.world.grid.pointsWithin(centre, 6);
+    const stageOf = new Map<number, number>();
+    const taken: number[] = [];
+
+    for (let i = 0; i < 20000; i += 1) {
+      sim.update();
+      for (const point of around) {
+        const here = sim.world.object[point] === object ? sim.world.objectData[point]! : -1;
+        const was = stageOf.get(point);
+        if (was !== undefined && was >= 0 && here === -1) taken.push(was);
+        stageOf.set(point, here);
+      }
+    }
+    return taken;
+  }
+
+  it('leaves corn standing until it is more than merely grown', () => {
+    const sim = newGame(726);
+    const hq = headquarters(sim);
+    const info = buildingInfo(BuildingType.Farm);
+
+    let best: number | undefined;
+    let bestSoil = 0;
+    for (const point of sim.world.grid.pointsWithin(hq.point, 9)) {
+      if (sim.world.grid.distance(hq.point, point) < 3) continue;
+      const space = evaluateBuildSpace(sim.world, point, PLAYER);
+      if (space === BuildSpace.None || !canHostSize(space, info.size)) continue;
+      const soil = sim.world.grid
+        .pointsWithin(point, 2)
+        .filter((near) => sim.world.farmableSides(near) === 6).length;
+      if (soil > bestSoil) {
+        bestSoil = soil;
+        best = point;
+      }
+    }
+    expect(sim.placeBuilding(PLAYER, best!, BuildingType.Farm).ok).toBe(true);
+    const farm = sim.buildings.find((building) => building.point === best)!;
+    const route = planRoad(sim.world, hq.flagPoint, farm.flagPoint, PLAYER);
+    if (route) sim.placeRoad(PLAYER, route);
+
+    // Measured against the last stage that is *drawn*: corn taken the moment it
+    // finished looking ready would come away at that stage, and it must not.
+    const taken = stagesAtHarvest(sim, farm.point, MapObject.Field);
+    expect(taken.length).toBeGreaterThan(0);
+    for (const stage of taken) expect(stage).toBeGreaterThan(FIELD_MAX_GROWTH);
+  });
+
+  it('leaves a tree standing until it is more than merely grown', () => {
+    const sim = newGame();
+    const cutter = buildAndConnect(sim, BuildingType.Woodcutter, MapObject.Tree)!;
+    const hut = sim.buildings.require(cutter);
+    buildAndConnect(sim, BuildingType.Forester, null, hut.point);
+
+    const taken = stagesAtHarvest(sim, hut.point, MapObject.Tree);
+    expect(taken.length).toBeGreaterThan(0);
+    for (const stage of taken) expect(stage).toBeGreaterThan(TREE_MAX_GROWTH);
+  });
+});
+
+describe('what a building says when it has run out', () => {
+  function lastExhaustedMessage(sim: Simulation): string | undefined {
+    const said = sim.events.filter((message) => message.category === 'exhausted');
+    return said[said.length - 1]?.text;
+  }
+
+  it('names stone at a quarry and trees at a woodcutter', () => {
+    for (const [type, prefers, expected] of [
+      [BuildingType.Quarry, MapObject.Stone, /stone/i],
+      [BuildingType.Woodcutter, MapObject.Tree, /trees/i],
+    ] as [BuildingType, MapObject, RegExp][]) {
+      const sim = newGame();
+      const id = buildAndConnect(sim, type, prefers)!;
+      expect(id).toBeDefined();
+      run(sim, 2000);
+
+      // Take away everything it works, so it really has run out.
+      const building = sim.buildings.require(id);
+      for (const point of sim.world.grid.pointsWithin(building.point, 8)) {
+        if (sim.world.object[point] === prefers) sim.world.object[point] = MapObject.None;
+      }
+
+      run(sim, 8000);
+
+      const said = lastExhaustedMessage(sim);
+      expect(said).toBeDefined();
+      // A quarry announcing it has nothing left to *cut* was the woodcutter's
+      // sentence, borrowed because both are "harvest" behaviours.
+      expect(said).toMatch(expected);
+    }
+  });
+});
+
+describe('removing a building by its flag', () => {
+  it('takes the building with it', () => {
+    const sim = newGame();
+    const id = buildAndConnect(sim, BuildingType.Woodcutter, MapObject.Tree)!;
+    const hut = sim.buildings.require(id);
+    const flagPoint = hut.flagPoint;
+
+    expect(sim.demolishFlag(PLAYER, flagPoint).ok).toBe(true);
+
+    expect(sim.buildings.get(id)).toBeUndefined();
+    expect(sim.world.building[hut.point]).toBe(0);
+    expect(sim.world.flag[flagPoint]).toBe(0);
+  });
+
+  it('still refuses the headquarters', () => {
+    const sim = newGame();
+    const hq = headquarters(sim);
+    expect(sim.demolishFlag(PLAYER, hq.flagPoint).ok).toBe(false);
+    expect(sim.buildings.get(hq.id)).toBeDefined();
+  });
+});
+
+describe('room to build', () => {
+  /** A patch of open ground well away from the headquarters. */
+  function clearing(sim: Simulation): number {
+    const hq = headquarters(sim);
+    for (const point of sim.world.grid.pointsWithin(hq.point, 9)) {
+      if (sim.world.grid.distance(hq.point, point) < 5) continue;
+      if (evaluateBuildSpace(sim.world, point, PLAYER) === BuildSpace.Castle) return point;
+    }
+    throw new Error('no clearing found');
+  }
+
+  function ring(sim: Simulation, centre: number, distance: number): number[] {
+    return sim.world.grid
+      .pointsWithin(centre, distance)
+      .filter((point) => sim.world.grid.distance(centre, point) === distance);
+  }
+
+  /** A node in the given ring that is not the site's own doorstep. */
+  function spotIn(sim: Simulation, centre: number, distance: number): number {
+    const flagPoint = sim.world.grid.neighbour(centre, FLAG_DIRECTION);
+    return ring(sim, centre, distance).find((point) => point !== flagPoint)!;
+  }
+
+  it('gives an open clearing room for the largest footprint', () => {
+    const sim = newGame();
+    expect(evaluateBuildSpace(sim.world, clearing(sim), PLAYER)).toBe(BuildSpace.Castle);
+  });
+
+  it('lets a tree in the first ring leave room for a hut only', () => {
+    const sim = newGame();
+    const point = clearing(sim);
+    sim.world.object[spotIn(sim, point, 1)] = MapObject.Tree;
+
+    expect(evaluateBuildSpace(sim.world, point, PLAYER)).toBe(BuildSpace.Hut);
+  });
+
+  it('lets a tree in the second ring leave room for a house', () => {
+    const sim = newGame();
+    const point = clearing(sim);
+    sim.world.object[spotIn(sim, point, 2)] = MapObject.Stone;
+
+    expect(evaluateBuildSpace(sim.world, point, PLAYER)).toBe(BuildSpace.House);
+  });
+
+  it('refuses everything but a flag beside another building', () => {
+    const sim = newGame();
+    const point = clearing(sim);
+    sim.world.building[spotIn(sim, point, 1)] = 999;
+
+    expect(evaluateBuildSpace(sim.world, point, PLAYER)).toBe(BuildSpace.Flag);
+  });
+
+  it('shrinks to a hut for a building in the second ring', () => {
+    const sim = newGame();
+    const point = clearing(sim);
+    sim.world.building[spotIn(sim, point, 2)] = 999;
+
+    expect(evaluateBuildSpace(sim.world, point, PLAYER)).toBe(BuildSpace.Hut);
+  });
+
+  it('shrinks to a house for a building in the third ring', () => {
+    const sim = newGame();
+    const point = clearing(sim);
+    sim.world.building[spotIn(sim, point, 3)] = 999;
+
+    expect(evaluateBuildSpace(sim.world, point, PLAYER)).toBe(BuildSpace.House);
+  });
+
+  it('does not count the road running into its own doorstep', () => {
+    const sim = newGame();
+    const point = clearing(sim);
+    const flagPoint = sim.world.grid.neighbour(point, FLAG_DIRECTION);
+
+    // A road laid to the doorstep before building, which is the one road with
+    // any business in the first ring.
+    const along = ring(sim, point, 1).find((candidate) => {
+      if (candidate === flagPoint) return false;
+      return DIRECTIONS.some(
+        (direction) => sim.world.grid.neighbour(candidate, direction) === flagPoint,
+      );
+    })!;
+    const towards = DIRECTIONS.find(
+      (direction) => sim.world.grid.neighbour(along, direction) === flagPoint,
+    )!;
+    sim.world.setRoad(along, towards, true);
+
+    expect(evaluateBuildSpace(sim.world, point, PLAYER)).toBe(BuildSpace.Castle);
+  });
+
+  it('counts a road that has nothing to do with it', () => {
+    const sim = newGame();
+    const point = clearing(sim);
+    const flagPoint = sim.world.grid.neighbour(point, FLAG_DIRECTION);
+
+    // A road crossing the first ring but not touching the doorstep.
+    const across = ring(sim, point, 1).find((candidate) => {
+      if (candidate === flagPoint) return false;
+      return !DIRECTIONS.some(
+        (direction) => sim.world.grid.neighbour(candidate, direction) === flagPoint,
+      );
+    })!;
+    const away = DIRECTIONS.find((direction) => {
+      const beyond = sim.world.grid.neighbour(across, direction);
+      return beyond !== OUT_OF_BOUNDS && beyond !== flagPoint && beyond !== point;
+    })!;
+    sim.world.setRoad(across, away, true);
+
+    expect(evaluateBuildSpace(sim.world, point, PLAYER)).toBe(BuildSpace.Hut);
+  });
+});
+
+describe('one forester to one woodcutter', () => {
+  it('keeps a woodcutter in work indefinitely', () => {
+    const sim = newGame();
+    const cutter = buildAndConnect(sim, BuildingType.Woodcutter, MapObject.Tree)!;
+    const hut = sim.buildings.require(cutter);
+    buildAndConnect(sim, BuildingType.Forester, null, hut.point);
+
+    run(sim, 8000);
+    const early = sim.storedWare(PLAYER, Ware.Log) + sim.storedWare(PLAYER, Ware.Board);
+
+    run(sim, 30000);
+    const late = sim.storedWare(PLAYER, Ware.Log) + sim.storedWare(PLAYER, Ware.Board);
+
+    // Still felling long after the natural trees would have gone.
+    expect(late).toBeGreaterThan(early);
+    expect(
+      sim.world.grid
+        .pointsWithin(hut.point, 6)
+        .filter((point) => sim.world.object[point] === MapObject.Tree).length,
+    ).toBeGreaterThan(0);
+  });
 });

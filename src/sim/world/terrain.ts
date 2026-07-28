@@ -136,13 +136,19 @@ export const MapObject = {
 
 export type MapObject = (typeof MapObject)[keyof typeof MapObject];
 
-/** A tree only yields logs once it has reached this growth stage. */
-export const TREE_FULLY_GROWN = 4;
+/**
+ * Growth runs one stage past the last one that is drawn.
+ *
+ * `MAX_GROWTH` is the tallest a tree or the fullest a field is ever pictured;
+ * `FULLY_GROWN` is the stage at which it may be felled or cut, one higher. A
+ * crop therefore stands ripe for a whole growth interval before anyone comes
+ * for it, instead of being taken on the tick it finishes looking ready.
+ */
 export const TREE_MAX_GROWTH = 4;
+export const TREE_FULLY_GROWN = 5;
 
-/** A field is only worth cutting once it has reached this growth stage. */
-export const FIELD_FULLY_GROWN = 3;
 export const FIELD_MAX_GROWTH = 3;
+export const FIELD_FULLY_GROWN = 4;
 
 /** Underground resources, revealed by geologists and worked by mines. */
 export const Resource = {

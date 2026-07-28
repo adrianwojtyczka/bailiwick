@@ -232,3 +232,24 @@ test('the panel follows the world without re-tapping the node', async ({ page })
   await expect(page.getByRole('button', { name: 'Lay a road from here' })).toBeVisible();
   await expect(placeFlag).toHaveCount(0);
 });
+
+test('demolishing asks before it acts', async ({ page }) => {
+  await startNewGame(page);
+  await page.getByRole('button', { name: 'Build' }).click();
+  await page.locator('.card', { hasText: "Woodcutter's hut" }).click();
+  expect(await tapUntilAccepted(page)).toBe(true);
+
+  // The site is selected after placing, so its panel is already up.
+  const demolish = page.getByRole('button', { name: 'Demolish', exact: true });
+  await expect(demolish).toBeVisible();
+
+  // One press arms it and says so; nothing is destroyed yet.
+  await demolish.click();
+  const confirm = page.getByRole('button', { name: 'Really demolish?' });
+  await expect(confirm).toBeVisible();
+  await expect(page.locator('.panel__title')).toContainText('Woodcutter');
+
+  // The second press does the deed, and the panel stops describing a building.
+  await confirm.click();
+  await expect(page.locator('.panel__title')).not.toContainText('Woodcutter');
+});

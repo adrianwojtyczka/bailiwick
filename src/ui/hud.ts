@@ -131,6 +131,8 @@ export class Hud {
   private lastEventCount = 0;
   private readCount = 0;
   private panelState = '';
+  /** Which destructive button is one press from acting, if any. */
+  private armed: string | null = null;
   private state: HudState = {
     selectedPoint: -1,
     pendingBuilding: null,
@@ -200,6 +202,11 @@ export class Hud {
     const signature = panelSignature(this.simulation, state.selectedPoint);
     const contentChanged = signature !== this.panelState;
     this.panelState = signature;
+
+    // Looking somewhere else disarms whatever was one press from being
+    // destroyed. A confirmation should never survive the player's attention
+    // moving on.
+    if (state.selectedPoint !== this.state.selectedPoint || modeChanged) this.armed = null;
 
     const selectionChanged =
       modeChanged || state.selectedPoint !== this.state.selectedPoint || contentChanged;
@@ -462,13 +469,44 @@ export class Hud {
 
     if (info.behaviour.kind !== 'headquarters') {
       children.push(
-        button('Demolish', 'panel__action panel__action--danger', () =>
+        this.dangerousAction(`demolish:${building.id}`, 'Demolish', 'Really demolish?', () =>
           this.callbacks.demolishBuilding(building.point),
         ),
       );
     }
 
     this.showPanel(children);
+  }
+
+  /**
+   * A button that asks before it acts.
+   *
+   * Demolishing is the one thing in the game that cannot be undone, and the
+   * panel sits under a thumb. The first press arms the button and it says so;
+   * the second does the deed. Anything else the player touches — another
+   * selection, another panel — disarms it, because `armed` is keyed to the
+   * thing being destroyed and the panel is rebuilt whenever that changes.
+   */
+  private dangerousAction(
+    key: string,
+    label: string,
+    confirm: string,
+    act: () => void,
+  ): HTMLElement {
+    const ready = this.armed === key;
+    const classes = ready
+      ? 'panel__action panel__action--danger panel__action--armed'
+      : 'panel__action panel__action--danger';
+
+    return button(ready ? confirm : label, classes, () => {
+      if (ready) {
+        this.armed = null;
+        act();
+        return;
+      }
+      this.armed = key;
+      this.renderPanel();
+    });
   }
 
   private showFlagPanel(point: number, flagId: number): void {
@@ -486,13 +524,20 @@ export class Hud {
       button('Send a geologist', 'panel__action', () => this.callbacks.sendGeologist(point)),
     ];
 
-    if (flag.building === 0) {
-      children.push(
-        button('Remove flag', 'panel__action panel__action--danger', () =>
-          this.callbacks.demolishFlag(point),
-        ),
-      );
-    }
+    // A flag serving a building takes the building with it, so it asks the
+    // same question the Demolish button does.
+    children.push(
+      flag.building === 0
+        ? this.dangerousAction(`flag:${flagId}`, 'Remove flag', 'Really remove?', () =>
+            this.callbacks.demolishFlag(point),
+          )
+        : this.dangerousAction(
+            `flag:${flagId}`,
+            'Remove flag and building',
+            'Really demolish?',
+            () => this.callbacks.demolishFlag(point),
+          ),
+    );
 
     this.showPanel(children);
   }

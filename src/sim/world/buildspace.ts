@@ -176,11 +176,10 @@ export function evaluateBuildSpace(world: World, point: number, player: number):
   // road in two — but a building would leave carriers walking through its walls.
   if (world.roadCount(point) > 0) return flagVerdict;
 
-  for (const direction of DIRECTIONS) {
-    const neighbour = world.grid.neighbour(point, direction);
-    if (neighbour === OUT_OF_BOUNDS) continue;
-    if (world.building[neighbour] !== 0) return flagVerdict;
-  }
+  // How much elbow room the surroundings leave. A hut only wants no neighbour
+  // building; bigger footprints want progressively more room around them.
+  const spacing = largestBySpacing(world, point, flagPoint);
+  if (spacing === BuildSpace.None) return flagVerdict;
 
   const flagUsable =
     flagPoint !== OUT_OF_BOUNDS &&
@@ -205,14 +204,105 @@ export function evaluateBuildSpace(world: World, point: number, player: number):
     if (!properties.buildable) allBuildable = false;
   }
 
+  // A mine goes into the mountain, where nothing else can be built at all, so
+  // it answers to the small rule and no more.
   if (allMineable) return BuildSpace.Mine;
   if (!allBuildable) return flagVerdict;
 
   const slope = world.maxSlopeAround(point);
-  if (slope <= SLOPE_LIMIT.castle) return BuildSpace.Castle;
-  if (slope <= SLOPE_LIMIT.house) return BuildSpace.House;
-  if (slope <= SLOPE_LIMIT.hut) return BuildSpace.Hut;
-  return flagVerdict;
+  const bySlope =
+    slope <= SLOPE_LIMIT.castle
+      ? BuildSpace.Castle
+      : slope <= SLOPE_LIMIT.house
+        ? BuildSpace.House
+        : slope <= SLOPE_LIMIT.hut
+          ? BuildSpace.Hut
+          : BuildSpace.None;
+
+  const verdict = Math.min(bySlope, spacing) as BuildSpace;
+  return verdict === BuildSpace.None ? flagVerdict : verdict;
+}
+
+/**
+ * The biggest footprint the ground around a site will tolerate.
+ *
+ * Bigger buildings want more room, and want it emptier:
+ *
+ *  - a **hut** only asks that no building stands on a neighbouring node;
+ *  - a **house** wants its first ring clear of buildings, flags, trees and
+ *    stone, and free of roads, with no building in the second ring;
+ *  - a **castle** wants both of the first two rings clear of buildings, flags,
+ *    trees and stone, and no building in the third.
+ *
+ * The site's own doorstep is excused throughout — the flag a building uses
+ * stands in its first ring by construction — and so is the road that runs into
+ * that flag, which is the only road with any business being there.
+ *
+ * Rings are checked outward and the answer falls as soon as one is spoiled, so
+ * a crowded spot costs six lookups. That matters: this runs for every visible
+ * node while the build overlay is up.
+ */
+function largestBySpacing(world: World, point: number, flagPoint: number): BuildSpace {
+  const { grid } = world;
+
+  for (const direction of DIRECTIONS) {
+    const neighbour = grid.neighbour(point, direction);
+    if (neighbour === OUT_OF_BOUNDS) continue;
+    if (world.building[neighbour] !== 0) return BuildSpace.None;
+  }
+
+  for (const neighbour of ringAt(world, point, 1)) {
+    if (neighbour === flagPoint) continue;
+    if (!isBareGround(world, neighbour)) return BuildSpace.Hut;
+    if (world.roadCount(neighbour) > 0 && !runsIntoTheFlag(world, neighbour, flagPoint)) {
+      return BuildSpace.Hut;
+    }
+  }
+  for (const further of ringAt(world, point, 2)) {
+    if (world.building[further] !== 0) return BuildSpace.Hut;
+  }
+
+  for (const further of ringAt(world, point, 2)) {
+    if (further === flagPoint) continue;
+    if (!isBareGround(world, further)) return BuildSpace.House;
+  }
+  for (const beyond of ringAt(world, point, 3)) {
+    if (world.building[beyond] !== 0) return BuildSpace.House;
+  }
+
+  return BuildSpace.Castle;
+}
+
+/** The nodes exactly `distance` steps from a point. */
+function ringAt(world: World, point: number, distance: number): number[] {
+  return world.grid
+    .pointsWithin(point, distance)
+    .filter((candidate) => world.grid.distance(point, candidate) === distance);
+}
+
+/** Nothing built and nothing growing: no building, no flag, no tree, no stone. */
+function isBareGround(world: World, point: number): boolean {
+  return (
+    world.building[point] === 0 &&
+    world.flag[point] === 0 &&
+    world.object[point] !== MapObject.Tree &&
+    world.object[point] !== MapObject.Stone
+  );
+}
+
+/**
+ * Whether a road crossing this node is the one serving the site's own flag.
+ *
+ * The road a player laid to his doorstep before building is the one road that
+ * belongs in the first ring, and it is recognised by having an edge that runs
+ * straight into the flag.
+ */
+function runsIntoTheFlag(world: World, point: number, flagPoint: number): boolean {
+  for (const direction of DIRECTIONS) {
+    if (!world.hasRoad(point, direction)) continue;
+    if (world.grid.neighbour(point, direction) === flagPoint) return true;
+  }
+  return false;
 }
 
 /**

@@ -183,11 +183,30 @@ export interface GameMessage {
 }
 
 /** What a building has actually run out of, in its own terms. */
+/**
+ * Why a building has stopped, in its own terms.
+ *
+ * Keyed by what the building actually works rather than by the shape of its
+ * behaviour: a quarry and a woodcutter are both `harvest`, and keying on that
+ * had an exhausted quarry announce it had nothing left to *cut*.
+ */
+const EXHAUSTED_REASON_FOR_OBJECT: Readonly<Partial<Record<MapObject, string>>> = {
+  [MapObject.Tree]: 'no trees left to fell within reach',
+  [MapObject.Stone]: 'no stone left to quarry within reach',
+};
+
+const EXHAUSTED_REASON_FOR_RESOURCE: Readonly<Partial<Record<Resource, string>>> = {
+  [Resource.Fish]: 'the water here is fished out',
+  [Resource.Water]: 'the ground here has run dry',
+  [Resource.Coal]: 'the coal seam is worked out',
+  [Resource.Iron]: 'the iron seam is worked out',
+  [Resource.Gold]: 'the gold seam is worked out',
+  [Resource.Granite]: 'the granite is worked out',
+};
+
 const EXHAUSTED_REASON: Readonly<Record<string, string>> = {
-  harvest: 'nothing left to cut within reach',
   plant: 'nowhere left to plant',
   farm: 'no ground left to sow',
-  extract: 'the deposit is worked out',
 };
 
 /** A find of each resource gets its own category, so like is coalesced. */
@@ -443,7 +462,20 @@ export class Simulation {
 
     const flag = this.flags.require(id);
     if (flag.owner !== player) return fail('That is not yours to remove.');
-    if (flag.building !== 0) return fail("A building's own flag cannot be removed.");
+
+    // A building's flag is part of the building. Taking it away takes the
+    // building with it, which is what a player reaching for the flag of
+    // something he wants gone expects. Demolishing on its own leaves the flag
+    // standing — right for the Demolish button, since roads still meet there —
+    // so the flag is pulled down afterwards as well, that being what was asked
+    // for. If the building refuses to go, the flag stays too.
+    if (flag.building !== 0) {
+      const building = this.buildings.get(flag.building);
+      if (building) {
+        const demolished = this.demolishBuilding(player, building.point);
+        if (!demolished.ok) return demolished;
+      }
+    }
 
     this.destroyFlag(flag);
     return OK;
@@ -2394,7 +2426,7 @@ export class Simulation {
 
     const info = buildingInfo(building.type);
     this.note(
-      `${info.name}: ${EXHAUSTED_REASON[info.behaviour.kind] ?? 'nothing left within reach'}.`,
+      `${info.name}: ${exhaustedReason(info.behaviour)}.`,
       MessageCategory.Exhausted,
       building.point,
     );
@@ -3124,12 +3156,20 @@ export class Simulation {
     return true;
   }
 
+  /**
+   * Every tree keeps its own clock, its phase taken from the node it stands on,
+   * exactly as corn does. A whole wood stepping together read as one flickering
+   * thing rather than a forest coming on.
+   */
   private growTrees(): void {
-    if (this.tick % TREE_GROWTH_INTERVAL !== 0) return;
-
     const stillGrowing: number[] = [];
     for (const point of this.growingTrees) {
       if (this.world.object[point] !== MapObject.Tree) continue;
+
+      if ((this.tick + point) % TREE_GROWTH_INTERVAL !== 0) {
+        stillGrowing.push(point);
+        continue;
+      }
 
       const stage = this.world.objectData[point]! + 1;
       this.world.objectData[point] = Math.min(TREE_FULLY_GROWN, stage);
@@ -3373,6 +3413,17 @@ export class Simulation {
 
     return hasher.hex();
   }
+}
+
+/** What a building should say when it has run out, in its own terms. */
+function exhaustedReason(behaviour: BuildingInfo['behaviour']): string {
+  if (behaviour.kind === 'harvest') {
+    return EXHAUSTED_REASON_FOR_OBJECT[behaviour.object] ?? 'nothing left to work within reach';
+  }
+  if (behaviour.kind === 'extract') {
+    return EXHAUSTED_REASON_FOR_RESOURCE[behaviour.resource] ?? 'the deposit is worked out';
+  }
+  return EXHAUSTED_REASON[behaviour.kind] ?? 'nothing left within reach';
 }
 
 function isStoreType(info: BuildingInfo): boolean {

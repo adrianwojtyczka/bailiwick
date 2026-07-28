@@ -65,6 +65,14 @@
   border-color: color-mix(in srgb, $brick 40%, $rule);
 }
 
+// One press from being carried out. Filled rather than outlined, so a thumb
+// hovering over it can see at a glance that the next tap is the real one.
+.panel__action--armed {
+  color: $parchment;
+  background: $brick;
+  border-color: $brick;
+}
+
 .buildmenu,
 .gamemenu {
   @include panel;
