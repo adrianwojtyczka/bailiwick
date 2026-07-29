@@ -109,6 +109,7 @@ export interface HudCallbacks {
   exportSave(): void;
   importSave(file: File): void;
   quitToTitle(): void;
+  saveAndQuit(): void;
 }
 
 export interface HudState {
@@ -149,6 +150,8 @@ export class Hud {
   private panelState = '';
   /** Which destructive button is one press from acting, if any. */
   private armed: string | null = null;
+  /** True while the menu is asking whether to save before quitting. */
+  private quitting = false;
   private state: HudState = {
     selectedPoint: -1,
     pendingBuilding: null,
@@ -375,6 +378,11 @@ export class Hud {
   }
 
   private renderMenu(): void {
+    if (this.quitting) {
+      this.renderQuitPrompt();
+      return;
+    }
+
     clear(this.menu);
     this.menu.append(
       el('h2', { class: 'gamemenu__title' }, 'Bailiwick'),
@@ -391,10 +399,40 @@ export class Hud {
         this.fileInput.click();
       }),
       button('Quit to title', 'gamemenu__item gamemenu__item--quit', () => {
+        this.quitting = true;
+        this.renderMenu();
+      }),
+      button('Close', 'gamemenu__item', () => this.closeMenu()),
+    );
+  }
+
+  /**
+   * What Quit to title asks before it acts.
+   *
+   * Three answers, so this is a small panel of its own rather than the
+   * arm-then-confirm the demolish buttons use — that shape has room for two.
+   * Nothing is written unless the player says so: quitting used to throw away
+   * everything since the last automatic save without a word.
+   */
+  private renderQuitPrompt(): void {
+    clear(this.menu);
+    this.menu.append(
+      el('h2', { class: 'gamemenu__title' }, 'Quit to title'),
+      el('p', { class: 'gamemenu__note' }, 'Anything since your last save will be lost.'),
+      button('Save and quit', 'gamemenu__item', () => {
+        this.quitting = false;
+        this.closeMenu();
+        this.callbacks.saveAndQuit();
+      }),
+      button('Quit without saving', 'gamemenu__item gamemenu__item--quit', () => {
+        this.quitting = false;
         this.closeMenu();
         this.callbacks.quitToTitle();
       }),
-      button('Close', 'gamemenu__item', () => this.closeMenu()),
+      button('Cancel', 'gamemenu__item', () => {
+        this.quitting = false;
+        this.renderMenu();
+      }),
     );
   }
 
@@ -732,6 +770,13 @@ export class Hud {
   private closeMenu(): void {
     this.menuOpen = false;
     this.menu.hidden = true;
+
+    // A half-answered question must not be waiting the next time the menu is
+    // opened; the player who closed it has already declined to answer.
+    if (this.quitting) {
+      this.quitting = false;
+      this.renderMenu();
+    }
   }
 }
 

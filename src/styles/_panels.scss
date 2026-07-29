@@ -162,6 +162,14 @@
   line-height: 1.35;
 }
 
+.gamemenu__note {
+  margin: 0 0 0.7rem;
+  color: $ink-soft;
+  font-size: 0.82rem;
+  line-height: 1.45;
+  text-align: center;
+}
+
 .gamemenu__item {
   @include tappable;
 

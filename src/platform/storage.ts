@@ -42,6 +42,14 @@ function open(): Promise<IDBDatabase> {
   });
 }
 
+/**
+ * Runs one request and waits for its **transaction** to commit.
+ *
+ * Resolving on the request's own `onsuccess` is a trap: for a write that fires
+ * while the transaction is still open, so `putSave` returned — and the game
+ * said "Game saved." — before anything had reached the disk. A tab closed in
+ * that window lost the save it had just been promised.
+ */
 function transact<T>(
   mode: IDBTransactionMode,
   run: (store: IDBObjectStore) => IDBRequest<T>,
@@ -52,9 +60,20 @@ function transact<T>(
         const transaction = db.transaction(STORE, mode);
         const request = run(transaction.objectStore(STORE));
 
-        request.onsuccess = () => resolve(request.result);
+        let result: T;
+        request.onsuccess = () => {
+          result = request.result;
+        };
         request.onerror = () => reject(request.error ?? new Error('the save database failed'));
-        transaction.oncomplete = () => db.close();
+
+        transaction.oncomplete = () => {
+          db.close();
+          resolve(result);
+        };
+        transaction.onabort = () => {
+          db.close();
+          reject(transaction.error ?? new Error('the save database failed'));
+        };
       }),
   );
 }

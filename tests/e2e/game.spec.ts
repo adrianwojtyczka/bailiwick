@@ -161,6 +161,8 @@ test('a game can be saved and then continued from the title screen', async ({ pa
 
   await page.getByRole('button', { name: 'Menu' }).click();
   await page.getByRole('button', { name: 'Quit to title' }).click();
+  // Quitting asks now; the save has just been taken, so decline.
+  await page.getByRole('button', { name: 'Quit without saving' }).click();
   await expect(page.locator('.title__name')).toBeVisible();
 
   await page.getByRole('button', { name: 'Load a save' }).click();
@@ -355,4 +357,90 @@ test('a barracks says how many soldiers hold it', async ({ page }) => {
   await expect(panel).toContainText('Garrison: 1 of 2', { timeout: 120_000 });
   await expect(panel).toContainText('Private: 1');
   await expect(panel).toContainText('Working');
+});
+
+test('continuing resumes the game you saved, not an older one', async ({ page }) => {
+  await startNewGame(page);
+  const centre = await canvasCentre(page);
+
+  // Something to look for afterwards. Placing it also moves the world well past
+  // anything an autosave could hold this early.
+  await page.getByRole('button', { name: 'Build' }).click();
+  await page.locator('.card', { hasText: "Woodcutter's hut" }).click();
+  const where = await tapUntilAccepted(page);
+  expect(where).not.toBeNull();
+  await expect(page.locator('.panel__title')).toContainText('Woodcutter');
+
+  await page.getByRole('button', { name: 'Menu' }).click();
+  await page.getByRole('button', { name: 'Save game' }).click();
+  await expect(page.locator('.hud__ticker')).toContainText('saved');
+
+  await page.getByRole('button', { name: 'Menu' }).click();
+  await page.getByRole('button', { name: 'Quit to title' }).click();
+  await page.getByRole('button', { name: 'Quit without saving' }).click();
+  await expect(page.locator('.title__name')).toBeVisible();
+
+  // Continue read the autosave slot alone, so it came back to a game from
+  // before the hut went down — or, this early, to no game at all.
+  const resume = page.getByRole('button', { name: /^Continue/ });
+  await expect(resume).toBeEnabled();
+  await resume.click();
+  await expect(page.locator('canvas.map')).toBeVisible();
+
+  // The view is centred on the headquarters again, so the same offset lands on
+  // the same node: the hut has to be standing there.
+  await page.mouse.click(centre.x + where!.dx, centre.y + where!.dy);
+  await expect(page.locator('.panel__title')).toContainText('Woodcutter');
+});
+
+test('quitting asks before it throws anything away', async ({ page }) => {
+  await startNewGame(page);
+
+  const menu = page.getByRole('button', { name: 'Menu' });
+  await menu.click();
+  await page.getByRole('button', { name: 'Quit to title' }).click();
+
+  // Three answers, and none of them taken yet.
+  await expect(page.getByRole('button', { name: 'Save and quit' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Quit without saving' })).toBeVisible();
+  await expect(page.locator('canvas.map')).toBeVisible();
+
+  // Cancel goes back to the ordinary menu rather than out of the game.
+  await page.getByRole('button', { name: 'Cancel' }).click();
+  await expect(page.getByRole('button', { name: 'Save game' })).toBeVisible();
+  await expect(page.locator('canvas.map')).toBeVisible();
+
+  // Save and quit leaves by way of a save, so the list has one to load.
+  await page.getByRole('button', { name: 'Quit to title' }).click();
+  await page.getByRole('button', { name: 'Save and quit' }).click();
+  await expect(page.locator('.title__name')).toBeVisible();
+
+  await page.getByRole('button', { name: 'Load a save' }).click();
+  await expect(page.locator('.title__button--save').first()).toBeVisible();
+});
+
+test('the title screen scrolls when it does not fit', async ({ page }) => {
+  // A short screen — a small phone, or a tall one in landscape, or any phone
+  // with the address bar showing. On a roomy handset the menu happens to fit
+  // and there is nothing to reach for; this is the case that bit.
+  await page.setViewportSize({ width: 400, height: 460 });
+  await page.goto('/');
+  await expect(page.locator('.title__name')).toHaveText('Bailiwick');
+
+  const title = page.locator('.title');
+  const room = await title.evaluate((element) => ({
+    scroll: element.scrollHeight,
+    client: element.clientHeight,
+  }));
+
+  // More here than fits, and the box it lives in must be what scrolls. With
+  // only a min-height it grew past a parent that clips instead, so the buttons
+  // below the fold could not be reached at all.
+  expect(room.scroll).toBeGreaterThan(room.client);
+
+  await title.evaluate((element) => element.scrollTo(0, 200));
+  expect(await title.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
+
+  // And the thing the player came for is reachable once it has scrolled.
+  await expect(page.getByRole('button', { name: 'New game' })).toBeVisible();
 });

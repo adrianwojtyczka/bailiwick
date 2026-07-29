@@ -357,6 +357,31 @@ function servesABuilding(world: World, flagPoint: number): boolean {
   return door !== OUT_OF_BOUNDS && world.building[door] !== 0;
 }
 
+/**
+ * How much room an outpost keeps clear of other outposts.
+ *
+ * Military buildings answered only to the ordinary footprint rule, so a
+ * frontier could be lined with barracks two nodes apart — a wall of huts rather
+ * than a line of posts. Nothing of yours may now stand within four nodes of
+ * another of yours, so two are at least five apart whatever their size.
+ */
+export const OUTPOST_SPACING = 4;
+
+/**
+ * Whether a military building may go here, on top of the ordinary space rules.
+ *
+ * Only the player's own outposts hold him back. The headquarters is not one —
+ * its behaviour is `headquarters`, not `military` — so it neither blocks nor is
+ * blocked.
+ */
+export function canPlaceOutpost(world: World, point: number, player: number): boolean {
+  for (const other of world.grid.pointsWithin(point, OUTPOST_SPACING)) {
+    if (other === point) continue;
+    if (world.outpost[other] === player) return false;
+  }
+  return true;
+}
+
 /** Whether a footprint fits in the space a point offers. */
 export function canHostSize(space: BuildSpace, size: BuildingSize): boolean {
   if (size === BuildingSize.Mine) return space === BuildSpace.Mine;

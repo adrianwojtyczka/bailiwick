@@ -25,6 +25,7 @@ import {
   canPlaceFlag,
   evaluateBuildSpace,
   FLAG_DIRECTION,
+  OUTPOST_SPACING,
 } from './world/buildspace';
 import {
   FIELD_FULLY_GROWN,
@@ -4287,5 +4288,115 @@ describe('a settler with no roads left to walk', () => {
     // He is beside the storehouse. Walking to the headquarters — merely the
     // oldest building he owns — was most of the way across the province.
     expect(man!.building).toBe(store.id);
+  });
+});
+
+describe('outposts keeping their distance', () => {
+  /** A point that will take a building of this size, `away` nodes from `from`. */
+  function siteAt(
+    sim: Simulation,
+    from: number,
+    away: number,
+    type: BuildingType,
+  ): number | undefined {
+    const info = buildingInfo(type);
+    for (const point of sim.world.grid.pointsWithin(from, away)) {
+      if (sim.world.grid.distance(from, point) !== away) continue;
+      const space = evaluateBuildSpace(sim.world, point, PLAYER);
+      if (space === BuildSpace.None || !canHostSize(space, info.size)) continue;
+      return point;
+    }
+    return undefined;
+  }
+
+  /** Plants an outpost well clear of the headquarters and hands back its point. */
+  function firstOutpost(sim: Simulation, type: BuildingType = BuildingType.Barracks): number {
+    const hq = headquarters(sim);
+    const point = siteAt(sim, hq.point, 6, type);
+    expect(point).toBeDefined();
+    expect(sim.placeBuilding(PLAYER, point!, type).ok).toBe(true);
+    return point!;
+  }
+
+  it('refuses a second outpost within four nodes and allows one at five', () => {
+    for (const type of [BuildingType.Barracks, BuildingType.Fortress]) {
+      const sim = newGame();
+      const first = firstOutpost(sim, type);
+
+      // Four away is inside the exclusion range, five is clear of it. The rule
+      // is about outposts, not about footprints, so it must bite the same for a
+      // barracks as for a fortress.
+      for (let away = 1; away <= OUTPOST_SPACING; away += 1) {
+        const near = siteAt(sim, first, away, type);
+        if (near === undefined) continue;
+        const refused = sim.placeBuilding(PLAYER, near, type);
+        expect(refused.ok).toBe(false);
+        expect(refused.ok === false && refused.reason).toContain('clear of your other outposts');
+      }
+
+      const far = siteAt(sim, first, OUTPOST_SPACING + 1, type);
+      expect(far).toBeDefined();
+      expect(sim.placeBuilding(PLAYER, far!, type).ok).toBe(true);
+    }
+  });
+
+  it('leaves ordinary buildings out of it, both ways', () => {
+    const sim = newGame();
+    const first = firstOutpost(sim);
+
+    // A hut may stand beside an outpost.
+    const beside = siteAt(sim, first, 2, BuildingType.Woodcutter);
+    expect(beside).toBeDefined();
+    expect(sim.placeBuilding(PLAYER, beside!, BuildingType.Woodcutter).ok).toBe(true);
+
+    // And a hut does not hold an outpost back — only the outpost five nodes off
+    // does, so a barracks placed clear of it goes up regardless of the hut.
+    const clear = siteAt(sim, first, OUTPOST_SPACING + 1, BuildingType.Barracks);
+    expect(clear).toBeDefined();
+    expect(sim.placeBuilding(PLAYER, clear!, BuildingType.Barracks).ok).toBe(true);
+  });
+
+  it('is not held back by somebody else’s outpost', () => {
+    const sim = newGame();
+    const hq = headquarters(sim);
+    const point = siteAt(sim, hq.point, 6, BuildingType.Barracks);
+    expect(point).toBeDefined();
+
+    // A rival's post right beside it. Pushing up against theirs is how ground
+    // is contested, so it must not be what stops you.
+    for (const near of sim.world.grid.pointsWithin(point!, 2)) {
+      if (sim.world.grid.distance(point!, near) === 2) {
+        sim.world.outpost[near] = PLAYER + 1;
+        break;
+      }
+    }
+
+    expect(sim.placeBuilding(PLAYER, point!, BuildingType.Barracks).ok).toBe(true);
+  });
+
+  it('frees the ground again when the outpost comes down', () => {
+    const sim = newGame();
+    const first = firstOutpost(sim);
+
+    const near = siteAt(sim, first, 2, BuildingType.Barracks);
+    expect(near).toBeDefined();
+    expect(sim.placeBuilding(PLAYER, near!, BuildingType.Barracks).ok).toBe(false);
+
+    // Not merely written but cleared: an outpost that has been pulled down must
+    // stop reserving the ground around it.
+    expect(sim.demolishBuilding(PLAYER, first).ok).toBe(true);
+    expect(sim.placeBuilding(PLAYER, near!, BuildingType.Barracks).ok).toBe(true);
+  });
+
+  it('still holds after a save has been loaded', () => {
+    const sim = newGame();
+    const first = firstOutpost(sim);
+    const near = siteAt(sim, first, 2, BuildingType.Barracks);
+    expect(near).toBeDefined();
+
+    // The map of outposts is derived and never saved, so this is what checks it
+    // is rebuilt from the buildings on the way in.
+    const restored = Simulation.fromSnapshot(sim.toSnapshot());
+    expect(restored.placeBuilding(PLAYER, near!, BuildingType.Barracks).ok).toBe(false);
   });
 });

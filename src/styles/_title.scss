@@ -8,7 +8,11 @@
   flex-direction: column;
   align-items: center;
   gap: 1.25rem;
-  min-height: 100%;
+  // A definite height, not merely a minimum: `overflow-y: auto` has nothing to
+  // scroll within unless the box is bounded, so on a phone the menu simply ran
+  // off the bottom of a screen that would not move. The map above it is still
+  // fixed — the scroll container is the title itself, not the page.
+  height: 100%;
   margin: 0 auto;
   max-width: 42rem;
   overflow-y: auto;

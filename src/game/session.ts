@@ -3,11 +3,9 @@ import type { ViewState } from '../render/renderer';
 import { encodeSave, exportSave, importSave, loadSimulation } from '../platform/save';
 import { AUTOSAVE_ID, putSave } from '../platform/storage';
 import type { BuildingType } from '../sim/data/buildings';
-import { buildingInfo } from '../sim/data/buildings';
 import type { Simulation } from '../sim/simulation';
 import { TICKS_PER_SECOND } from '../sim/simulation';
 import { planRoad } from '../sim/transport/pathfinding';
-import type { BuildingSize } from '../sim/world/buildspace';
 import { el } from '../ui/dom';
 import { Hud } from '../ui/hud';
 import { attachGestures } from '../ui/input/gestures';
@@ -97,6 +95,7 @@ export class GameSession {
       exportSave: () => void this.exportToFile(),
       importSave: (file) => void this.importFromFile(file),
       quitToTitle: () => this.onQuit(),
+      saveAndQuit: () => void this.saveAndQuit(),
     });
 
     this.loop = new GameLoop(
@@ -159,7 +158,7 @@ export class GameSession {
       selectedPoint: this.selectedPoint,
       buildPreview: this.buildPreview(),
       roadPreview: this.roadPreview,
-      buildSpaceOverlay: this.overlaySize(),
+      buildSpaceOverlay: this.mode.kind === 'build' ? this.mode.type : null,
       alpha,
     };
 
@@ -179,10 +178,6 @@ export class GameSession {
     const point = this.hoverPoint >= 0 ? this.hoverPoint : this.selectedPoint;
     if (point < 0) return null;
     return { point, type: this.mode.type };
-  }
-
-  private overlaySize(): BuildingSize | null {
-    return this.mode.kind === 'build' ? buildingInfo(this.mode.type).size : null;
   }
 
   // -------------------------------------------------------------- controls
@@ -281,14 +276,26 @@ export class GameSession {
 
   // ----------------------------------------------------------------- saves
 
-  private async save(name: string): Promise<void> {
+  private async save(name: string): Promise<boolean> {
     try {
       const bytes = await encodeSave(this.simulation, name);
       await putSave(`slot-${Date.now()}`, { name, savedAt: Date.now(), tick: this.simulation.tick }, bytes);
       this.showNotice('Game saved.');
+      return true;
     } catch (error) {
       this.showNotice(`Could not save: ${describe(error)}`);
+      return false;
     }
+  }
+
+  /**
+   * Writes an ordinary save and only then leaves.
+   *
+   * The ordering is the point: a save that failed must not take the game down
+   * with it, or the player loses the province *and* the chance to try again.
+   */
+  private async saveAndQuit(): Promise<void> {
+    if (await this.save('Saved on quitting')) this.onQuit();
   }
 
   private async autosave(): Promise<void> {

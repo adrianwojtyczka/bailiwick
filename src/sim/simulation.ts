@@ -30,6 +30,7 @@ import {
   BuildSpace,
   canHostSize,
   canPlaceFlag,
+  canPlaceOutpost,
   canRouteRoadThrough,
   canTraverseEdge,
   evaluateBuildSpace,
@@ -530,6 +531,10 @@ export class Simulation {
     if (space === BuildSpace.None) return fail('Nothing can be built there.');
     if (!canHostSize(space, info.size)) return fail(`There is not enough room for a ${info.name}.`);
 
+    if (info.behaviour.kind === 'military' && !canPlaceOutpost(this.world, point, player)) {
+      return fail(`A ${info.name} must stand clear of your other outposts.`);
+    }
+
     const building = this.createBuilding(type, point, player);
     if (!building) return fail(`A ${info.name} cannot be built there.`);
     return OK;
@@ -858,6 +863,9 @@ export class Simulation {
     // Its footprint goes on the map beside its id, so the spacing rules can ask
     // how much room the neighbours need without a table to look it up in.
     this.world.buildingSize[point] = info.size;
+    // Outposts keep their distance from one another, and the rule is a function
+    // of the world alone, so whose outpost it is goes on the map beside the id.
+    if (info.behaviour.kind === 'military') this.world.outpost[point] = owner;
 
     const flag = this.flags.require(this.world.flag[flagPoint]!);
     flag.building = building.id;
@@ -893,6 +901,7 @@ export class Simulation {
     // Anything in the building's own stores is simply lost, as in the original.
     this.world.building[building.point] = 0;
     this.world.buildingSize[building.point] = 0;
+    this.world.outpost[building.point] = 0;
 
     const flagId = this.world.flag[building.flagPoint];
     if (flagId) {
@@ -4018,7 +4027,9 @@ export class Simulation {
     // Footprints are derived, so no save carries them: rebuild them from the
     // buildings themselves, and every save ever written gains the spacing rules.
     simulation.buildings.forEach((building) => {
-      world.buildingSize[building.point] = buildingInfo(building.type).size;
+      const info = buildingInfo(building.type);
+      world.buildingSize[building.point] = info.size;
+      if (info.behaviour.kind === 'military') world.outpost[building.point] = building.owner;
     });
     // Version 1 settlers have no survey counter; nobody in such a save is a
     // geologist, so nought is not merely a safe default but the right one.

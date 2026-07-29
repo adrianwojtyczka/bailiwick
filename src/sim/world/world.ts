@@ -75,6 +75,16 @@ export class World {
    * save is loaded, so it is not written to the save file.
    */
   readonly buildingSize: Uint8Array;
+  /**
+   * The owner of the military building standing on a point, and 0 elsewhere.
+   *
+   * Outposts keep their distance from one another, and the rule needs to know
+   * both *that* a point holds one and *whose* it is — another player's does not
+   * hold you back, since pushing a post up against theirs is how ground is
+   * contested. Keeping the owner rather than a bare flag answers both in one
+   * lookup. Derived and rebuilt on load, like `buildingSize`.
+   */
+  readonly outpost: Uint8Array;
 
   constructor(grid: MapGrid) {
     this.grid = grid;
@@ -93,6 +103,7 @@ export class World {
     this.building = new Int32Array(size);
     this.flag = new Int32Array(size);
     this.buildingSize = new Uint8Array(size);
+    this.outpost = new Uint8Array(size);
   }
 
   // ---------------------------------------------------------------- terrain

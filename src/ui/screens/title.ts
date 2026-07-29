@@ -1,5 +1,6 @@
 import { loadSimulation } from '../../platform/save';
-import { AUTOSAVE_ID, getSave, listSaves, deleteSave } from '../../platform/storage';
+import type { SaveSlotSummary } from '../../platform/storage';
+import { getSave, listSaves, deleteSave } from '../../platform/storage';
 import type { Simulation } from '../../sim/simulation';
 import { button, clear, el } from '../dom';
 import crestSvg from './crest.svg?raw';
@@ -111,6 +112,20 @@ export class TitleScreen {
     void this.refreshContinue();
   }
 
+  /**
+   * The most recent save of any kind.
+   *
+   * Continue used to read the autosave slot alone, so pressing Save, quitting
+   * and continuing brought back the last *automatic* save — up to two minutes
+   * stale, or from an entirely earlier sitting. The saved game was never lost;
+   * it was under "Load a save", which is precisely why this read as the game
+   * ignoring the button. `listSaves` already returns every slot newest first.
+   */
+  private async newestSave(): Promise<SaveSlotSummary | undefined> {
+    const saves = await listSaves();
+    return saves[0];
+  }
+
   private async refreshContinue(): Promise<void> {
     const continueButton = this.menu.querySelector<HTMLButtonElement>(
       '.title__button:nth-child(2)',
@@ -118,10 +133,10 @@ export class TitleScreen {
     if (!continueButton) return;
 
     try {
-      const autosave = await getSave(AUTOSAVE_ID);
-      continueButton.disabled = !autosave;
-      if (autosave) {
-        continueButton.textContent = `Continue — ${formatPlayed(autosave.meta.tick)}`;
+      const newest = await this.newestSave();
+      continueButton.disabled = !newest;
+      if (newest) {
+        continueButton.textContent = `Continue — ${formatPlayed(newest.meta.tick)}`;
       }
     } catch {
       continueButton.disabled = true;
@@ -130,12 +145,13 @@ export class TitleScreen {
 
   private async continueGame(): Promise<void> {
     try {
-      const autosave = await getSave(AUTOSAVE_ID);
-      if (!autosave) {
+      const newest = await this.newestSave();
+      const save = newest && (await getSave(newest.id));
+      if (!save) {
         this.say('There is no game to continue.');
         return;
       }
-      this.callbacks.resume(await loadSimulation(autosave.bytes));
+      this.callbacks.resume(await loadSimulation(save.bytes));
     } catch (error) {
       this.say(`Could not continue: ${describe(error)}`);
     }

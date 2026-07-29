@@ -9,8 +9,8 @@ import type { Simulation } from '../../sim/simulation';
 import {
   BuildSpace,
   canHostSize,
+  canPlaceOutpost,
   evaluateBuildSpace,
-  type BuildingSize,
 } from '../../sim/world/buildspace';
 import { MapObject, Resource } from '../../sim/world/terrain';
 import { PALETTE, PLAYER_COLOURS } from '../art/palette';
@@ -296,7 +296,9 @@ export class CanvasRenderer implements Renderer {
   private drawBuildSpaces(bounds: ReturnType<Camera['visibleBounds']>, view: ViewState): void {
     const { ctx, camera } = this;
     const { grid } = this.simulation.world;
-    const size = view.buildSpaceOverlay as BuildingSize;
+    const type = view.buildSpaceOverlay as BuildingType;
+    const info = buildingInfo(type);
+    const outpost = info.behaviour.kind === 'military';
 
     for (let row = bounds.minRow; row <= bounds.maxRow; row += 1) {
       for (let col = bounds.minCol; col <= bounds.maxCol; col += 1) {
@@ -304,7 +306,9 @@ export class CanvasRenderer implements Renderer {
         const space = evaluateBuildSpace(this.simulation.world, point, view.playerId);
         if (space === BuildSpace.None) continue;
 
-        const fits = canHostSize(space, size);
+        const fits =
+          canHostSize(space, info.size) &&
+          (!outpost || canPlaceOutpost(this.simulation.world, point, view.playerId));
         const x = this.screenX(point);
         const y = this.screenY(point);
         const radius = (fits ? 5 : 3) * camera.zoom;
