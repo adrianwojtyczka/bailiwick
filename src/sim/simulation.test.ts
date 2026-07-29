@@ -4,10 +4,18 @@ import { DIRECTIONS } from './core/direction';
 import { OUT_OF_BOUNDS } from './core/grid';
 import { Profession } from './data/professions';
 import { Ware } from './data/wares';
-import type { Flag, Settler } from './entities/types';
+import type { Building, Flag, Settler } from './entities/types';
 import { BuildingState, BuildingStatus, FLAG_CAPACITY, SettlerState } from './entities/types';
 import { garrisonStrength, Rank } from './data/ranks';
-import { Simulation, SETTLERS_KEPT_BACK, STARTING_GARRISON } from './simulation';
+import {
+  EXHAUSTED_REPEAT_TICKS,
+  EXHAUSTED_REPORT_TICKS,
+  MINIMUM_GARRISON,
+  SETTLERS_KEPT_BACK,
+  Simulation,
+  STARTING_GARRISON,
+  TRAINING_TICKS,
+} from './simulation';
 import { INPUT_STOCK_LIMIT, outstandingDemand, willAccept } from './transport/dispatch';
 import { planRoad } from './transport/pathfinding';
 import {
@@ -1882,7 +1890,7 @@ describe('carrying the work in and out', () => {
 });
 
 describe('messages', () => {
-  it('says once when a building has run out, not every tick', () => {
+  it('says a building has run out again and again, but not every tick', () => {
     const sim = newGame();
     const id = buildAndConnect(sim, BuildingType.Woodcutter, MapObject.Tree)!;
     run(sim, 3000);
@@ -1895,10 +1903,18 @@ describe('messages', () => {
 
     run(sim, 6000);
 
+    // Said once when it really stops, then every five minutes it stays that
+    // way — a notice that scrolls out of the ticker and never returns leaves a
+    // hut standing idle for the rest of the game with nothing to say so.
     const exhausted = sim.events.filter((message) => message.category === 'exhausted');
-    expect(exhausted.length).toBeGreaterThan(0);
-    expect(exhausted.length).toBeLessThanOrEqual(2);
+    expect(exhausted.length).toBeGreaterThan(1);
+    expect(exhausted.length).toBeLessThanOrEqual(1 + Math.ceil(6000 / EXHAUSTED_REPEAT_TICKS));
     expect(exhausted[0]!.point).toBe(hut.point);
+
+    // Spaced out, not in a burst.
+    for (let i = 1; i < exhausted.length; i += 1) {
+      expect(exhausted[i]!.tick - exhausted[i - 1]!.tick).toBe(EXHAUSTED_REPEAT_TICKS);
+    }
   });
 
   it('waits two full minutes before saying so', () => {
@@ -2127,7 +2143,7 @@ describe('a store that dispatches', () => {
 });
 
 describe('saying a building has run out', () => {
-  it('waits until it has really stopped, and says so once', () => {
+  it('waits until it has really stopped before saying anything', () => {
     const sim = newGame();
     const id = buildAndConnect(sim, BuildingType.Woodcutter, MapObject.Tree)!;
     run(sim, 3000);
@@ -2141,7 +2157,8 @@ describe('saying a building has run out', () => {
     run(sim, 200);
     expect(sim.events.filter((message) => message.category === 'exhausted')).toHaveLength(0);
 
-    run(sim, 8000);
+    // Just past the first announcement and well short of the repeat.
+    run(sim, EXHAUSTED_REPORT_TICKS + 100);
     const exhausted = sim.events.filter((message) => message.category === 'exhausted');
     expect(exhausted).toHaveLength(1);
     expect(exhausted[0]!.point).toBe(hut.point);
@@ -3055,9 +3072,13 @@ describe('a flag raised under a walking carrier', () => {
       }
       expect(carrier).toBeDefined();
 
+      // Somewhere a flag can genuinely go: not under his feet, not the node he
+      // is walking into, and not crowding a flag that is already there.
       const spot = road.points.find(
         (point) =>
-          point !== carrier!.point && point !== carrier!.toPoint && sim.world.flag[point] === 0,
+          point !== carrier!.point &&
+          point !== carrier!.toPoint &&
+          canPlaceFlag(sim.world, point, PLAYER),
       );
       expect(spot).toBeDefined();
 
@@ -3700,15 +3721,21 @@ describe('raising an army', () => {
   it('turns a sword, a shield and a beer into a private', () => {
     const sim = newGame();
     const hq = headquarters(sim);
-    hq.reserve = SETTLERS_KEPT_BACK + 4;
+    // Comfortably over the cap the province supports, so no settler arrives
+    // part way through and quietly refills the reserve under the assertions.
+    hq.reserve = 40;
     supply(hq, 1);
 
     const before = garrisonStrength(hq.garrison);
-    run(sim, 2);
 
+    // Not on the next tick: a man takes half a minute to train.
+    run(sim, TRAINING_TICKS - 1);
+    expect(garrisonStrength(hq.garrison)).toBe(before);
+
+    run(sim, 1);
     expect(garrisonStrength(hq.garrison)).toBe(before + 1);
     expect(hq.garrison[Rank.Private]).toBe(STARTING_GARRISON + 1);
-    expect(hq.reserve).toBe(SETTLERS_KEPT_BACK + 3);
+    expect(hq.reserve).toBe(39);
     // Exactly one of each, and no more: an armoury's output must not vanish.
     expect(hq.stock[Ware.Sword]).toBe(0);
     expect(hq.stock[Ware.Shield]).toBe(0);
@@ -3801,11 +3828,9 @@ describe('raising an army', () => {
       expect(soldiers(sim)).toBe(before);
     }
 
-    const wanted = buildingInfo(BuildingType.Barracks).behaviour;
-    expect(wanted.kind).toBe('military');
-    expect(garrisonStrength(barracks.garrison)).toBe(
-      wanted.kind === 'military' ? wanted.garrison : 0,
-    );
+    // Inland, and so held by the fewest men the rule allows rather than by
+    // everybody it has room for.
+    expect(garrisonStrength(barracks.garrison)).toBe(MINIMUM_GARRISON);
     // And having filled it, it stops asking.
     expect(barracks.garrisonRequested).toBe(0);
   });
@@ -3918,5 +3943,349 @@ describe('raising an army', () => {
     // An armoury that only ever forged swords left half a barracks unarmed.
     expect(forge(5, 0)).toBe(Ware.Shield);
     expect(forge(0, 5)).toBe(Ware.Sword);
+  });
+});
+
+describe('how hard an outpost is held', () => {
+  /** Runs until a building is finished. */
+  function finish(sim: Simulation, id: number, ticks = 3000): boolean {
+    for (let i = 0; i < ticks; i += 1) {
+      sim.update();
+      if (sim.buildings.get(id)?.state === BuildingState.Complete) return true;
+    }
+    return false;
+  }
+
+  function manned(sim: Simulation, id: number, ticks = 3000): number {
+    for (let i = 0; i < ticks; i += 1) sim.update();
+    return garrisonStrength(sim.buildings.require(id).garrison);
+  }
+
+  it('sends the weakest man to quiet country', () => {
+    const sim = newGame();
+    const hq = headquarters(sim);
+
+    // Emptied before it is built, or one of the opening privates is already on
+    // the march by the time there is a choice to make — and the test would
+    // pass whichever man the rule picked.
+    hq.garrison.fill(0);
+
+    const id = buildAndConnect(sim, BuildingType.Barracks)!;
+    expect(finish(sim, id)).toBe(true);
+    expect(garrisonStrength(sim.buildings.require(id).garrison)).toBe(0);
+
+    // A general and a private to choose from. Promotions are bought with gold
+    // to be spent where they matter, not to garrison an empty hillside.
+    hq.garrison[Rank.Private] = 1;
+    hq.garrison[Rank.General] = 1;
+
+    const barracks = sim.buildings.require(id);
+    for (let i = 0; i < 1200 && garrisonStrength(barracks.garrison) === 0; i += 1) sim.update();
+
+    expect(garrisonStrength(barracks.garrison)).toBe(MINIMUM_GARRISON);
+    expect(barracks.garrison[Rank.Private]).toBe(1);
+    expect(barracks.garrison[Rank.General]).toBe(0);
+    // And the general is still in the store, where he is of some use.
+    expect(hq.garrison[Rank.General]).toBe(1);
+  });
+
+  it('turns out in force, and sends the best, where it faces somebody', () => {
+    const sim = newGame();
+    const hq = headquarters(sim);
+
+    // Nobody to send while it is going up, so no weak man is posted before the
+    // border is there to be noticed.
+    hq.garrison.fill(0);
+
+    const id = buildAndConnect(sim, BuildingType.Barracks)!;
+    expect(finish(sim, id)).toBe(true);
+    const barracks = sim.buildings.require(id);
+
+    const full = buildingInfo(BuildingType.Barracks).behaviour;
+    expect(full.kind).toBe('military');
+    const places = full.kind === 'military' ? full.garrison : 0;
+    expect(places).toBeGreaterThan(MINIMUM_GARRISON);
+
+    // A rival's ground inside its reach. There is no second player to build
+    // one yet, so the frontier is painted onto the map directly.
+    const radius = full.kind === 'military' ? full.radius : 0;
+    let painted = 0;
+    for (const point of sim.world.grid.pointsWithin(barracks.point, radius)) {
+      if (sim.world.grid.distance(barracks.point, point) < radius) continue;
+      sim.world.owner[point] = 2;
+      painted += 1;
+      if (painted >= 3) break;
+    }
+    expect(painted).toBeGreaterThan(0);
+
+    // The frontier is surveyed on the sweep beat rather than every tick, so
+    // give it a sweep to notice before anybody is available to march.
+    run(sim, 80);
+
+    hq.garrison[Rank.Private] = 4;
+    hq.garrison[Rank.Officer] = 4;
+
+    expect(manned(sim, id)).toBe(places);
+    // The best men available, since this is where they are worth having.
+    expect(barracks.garrison[Rank.Officer]).toBe(places);
+    expect(barracks.garrison[Rank.Private]).toBe(0);
+  });
+});
+
+describe('the door of a store', () => {
+  /**
+   * Men the store is sending out, caught on the step between door and flag.
+   *
+   * A road carrier who walked in with a crate and is making his own way back to
+   * his post is passing through rather than being dispatched, and the gate does
+   * not govern him; `WalkingToJob` is everybody sent out to a job, and
+   * `DeliveringToFlag` is the porter carrying goods out.
+   */
+  function onTheStep(sim: Simulation): number {
+    let count = 0;
+    for (const settler of sim.settlers.all()) {
+      if (settler.fromPoint === settler.toPoint) continue;
+      if (
+        settler.state !== SettlerState.WalkingToJob &&
+        settler.state !== SettlerState.DeliveringToFlag
+      ) {
+        continue;
+      }
+
+      const buildingId = sim.world.building[settler.fromPoint];
+      if (!buildingId) continue;
+      const store = sim.buildings.get(buildingId);
+      if (!store) continue;
+      // Stores only. A worker stepping out of his own woodcutter's hut is not
+      // using anybody's doorway.
+      const kind = buildingInfo(store.type).behaviour.kind;
+      if (kind !== 'headquarters' && kind !== 'store') continue;
+      if (settler.toPoint === store.flagPoint) count += 1;
+    }
+    return count;
+  }
+
+  it('lets one man out at a time, porters and workers alike', () => {
+    const sim = newGame();
+
+    // A busy opening: several buildings wanting workers and a store wanting to
+    // send their materials, all at once.
+    for (const type of [
+      BuildingType.Woodcutter,
+      BuildingType.Forester,
+      BuildingType.Quarry,
+      BuildingType.Sawmill,
+    ]) {
+      buildAndConnect(sim, type, type === BuildingType.Woodcutter ? MapObject.Tree : null);
+    }
+
+    let worst = 0;
+    let sawSomebody = false;
+    for (let i = 0; i < 4000; i += 1) {
+      sim.update();
+      const step = onTheStep(sim);
+      if (step > 0) sawSomebody = true;
+      worst = Math.max(worst, step);
+    }
+
+    // Six men appearing on the flag in one tick was a conjuring trick, not a
+    // settlement.
+    expect(sawSomebody).toBe(true);
+    expect(worst).toBe(1);
+  });
+
+  it('is not held by a man walking back in', () => {
+    const sim = newGame();
+    const hq = headquarters(sim);
+    buildAndConnect(sim, BuildingType.Woodcutter, MapObject.Tree);
+    run(sim, 1500);
+
+    // Somebody stepping from the flag towards the door: the way back in.
+    const inbound = sim.settlers
+      .all()
+      .find((settler) => settler.fromPoint === hq.flagPoint && settler.toPoint === hq.point);
+
+    // Whether or not one happens to be caught this instant, what matters is
+    // that inbound traffic is not what the gate is reading.
+    if (inbound) {
+      const before = sim.storedWare(PLAYER, Ware.Log);
+      run(sim, 600);
+      expect(sim.storedWare(PLAYER, Ware.Log)).toBeGreaterThanOrEqual(before);
+    }
+
+    // The store goes on dispatching over a long run rather than seizing up.
+    const logs = sim.storedWare(PLAYER, Ware.Log);
+    run(sim, 3000);
+    expect(sim.storedWare(PLAYER, Ware.Log)).toBeGreaterThan(logs);
+  });
+});
+
+describe('which store supplies a site', () => {
+  /**
+   * A game with a storehouse as far from the headquarters as the province
+   * allows, both stocked, and finished.
+   */
+  function withAStorehouse(sim: Simulation): { store: Building; hq: Building } {
+    const hq = headquarters(sim);
+    const info = buildingInfo(BuildingType.Storehouse);
+
+    let far: number | undefined;
+    let furthest = 0;
+    for (const point of sim.world.grid.pointsWithin(hq.point, 9)) {
+      const distance = sim.world.grid.distance(hq.point, point);
+      if (distance <= furthest) continue;
+      const space = evaluateBuildSpace(sim.world, point, PLAYER);
+      if (space === BuildSpace.None || !canHostSize(space, info.size)) continue;
+      furthest = distance;
+      far = point;
+    }
+    expect(far).toBeDefined();
+    expect(sim.placeBuilding(PLAYER, far!, BuildingType.Storehouse).ok).toBe(true);
+
+    const store = sim.buildings.find((building) => building.point === far)!;
+    expect(
+      sim.placeRoad(PLAYER, planRoad(sim.world, hq.flagPoint, store.flagPoint, PLAYER)!).ok,
+    ).toBe(true);
+
+    for (let i = 0; i < 6000 && store.state !== BuildingState.Complete; i += 1) sim.update();
+    expect(store.state).toBe(BuildingState.Complete);
+
+    store.stock[Ware.Board] = 20;
+    store.stock[Ware.Stone] = 20;
+    hq.stock[Ware.Board] = 20;
+    hq.stock[Ware.Stone] = 20;
+    return { store, hq };
+  }
+
+  it('takes the boards from the nearer store', () => {
+    const sim = newGame();
+    const { store, hq } = withAStorehouse(sim);
+    const info = buildingInfo(BuildingType.Sawmill);
+
+    // A site hard by the headquarters and well away from the storehouse.
+    let site: number | undefined;
+    let nearest = Number.POSITIVE_INFINITY;
+    for (const point of sim.world.grid.pointsWithin(hq.point, 9)) {
+      const toHq = sim.world.grid.distance(hq.point, point);
+      if (toHq < 3 || toHq >= nearest) continue;
+      if (sim.world.grid.distance(store.point, point) <= toHq + 2) continue;
+      const space = evaluateBuildSpace(sim.world, point, PLAYER);
+      if (space === BuildSpace.None || !canHostSize(space, info.size)) continue;
+      nearest = toHq;
+      site = point;
+    }
+    expect(site).toBeDefined();
+    expect(sim.placeBuilding(PLAYER, site!, BuildingType.Sawmill).ok).toBe(true);
+    const building = sim.buildings.find((candidate) => candidate.point === site)!;
+    expect(
+      sim.placeRoad(PLAYER, planRoad(sim.world, hq.flagPoint, building.flagPoint, PLAYER)!).ok,
+    ).toBe(true);
+
+    const storeBefore = store.stock[Ware.Board]!;
+    for (let i = 0; i < 4000 && building.state !== BuildingState.Complete; i += 1) sim.update();
+
+    // Every board came from the near store. The far one used to send some of
+    // them, because the busy headquarters kept standing down on its own full
+    // flag and the quiet storehouse got in first.
+    expect(store.stock[Ware.Board]).toBe(storeBefore);
+    expect(hq.stock[Ware.Board]).toBeLessThan(20);
+  });
+
+  it('turns back a crate that set out from the wrong store', () => {
+    const sim = newGame();
+    const { store, hq } = withAStorehouse(sim);
+
+    // A crate from the far storehouse, waiting on its own doorstep, bound for
+    // a site the headquarters could serve far more cheaply.
+    const info = buildingInfo(BuildingType.Sawmill);
+    let site: number | undefined;
+    for (const point of sim.world.grid.pointsWithin(hq.point, 4)) {
+      if (sim.world.grid.distance(hq.point, point) < 3) continue;
+      const space = evaluateBuildSpace(sim.world, point, PLAYER);
+      if (space === BuildSpace.None || !canHostSize(space, info.size)) continue;
+      site = point;
+      break;
+    }
+    expect(site).toBeDefined();
+    expect(sim.placeBuilding(PLAYER, site!, BuildingType.Sawmill).ok).toBe(true);
+    const building = sim.buildings.find((candidate) => candidate.point === site)!;
+    expect(
+      sim.placeRoad(PLAYER, planRoad(sim.world, hq.flagPoint, building.flagPoint, PLAYER)!).ok,
+    ).toBe(true);
+    run(sim, 40);
+
+    const wrong = sim.flags.require(sim.world.flag[store.flagPoint]!);
+    wrong.wares.push({ ware: Ware.Board, destination: building.id });
+    const parcel = wrong.wares[wrong.wares.length - 1]!;
+
+    // The next sweep should send it back into the storehouse rather than let it
+    // walk the length of the province.
+    run(sim, 45);
+    expect(parcel.destination).toBe(store.id);
+  });
+});
+
+describe('a settler with no roads left to walk', () => {
+  it('goes to the store he is nearest, not the oldest one', () => {
+    const sim = newGame();
+    const hq = headquarters(sim);
+    const info = buildingInfo(BuildingType.Storehouse);
+
+    let far: number | undefined;
+    let furthest = 0;
+    for (const point of sim.world.grid.pointsWithin(hq.point, 9)) {
+      const distance = sim.world.grid.distance(hq.point, point);
+      if (distance <= furthest) continue;
+      const space = evaluateBuildSpace(sim.world, point, PLAYER);
+      if (space === BuildSpace.None || !canHostSize(space, info.size)) continue;
+      furthest = distance;
+      far = point;
+    }
+    expect(sim.placeBuilding(PLAYER, far!, BuildingType.Storehouse).ok).toBe(true);
+    const store = sim.buildings.find((building) => building.point === far)!;
+    expect(
+      sim.placeRoad(PLAYER, planRoad(sim.world, hq.flagPoint, store.flagPoint, PLAYER)!).ok,
+    ).toBe(true);
+    for (let i = 0; i < 6000 && store.state !== BuildingState.Complete; i += 1) sim.update();
+    expect(store.state).toBe(BuildingState.Complete);
+
+    // A hut hard beside the storehouse, staffed, and connected only to it.
+    let hutPoint: number | undefined;
+    let nearest = Number.POSITIVE_INFINITY;
+    const hutInfo = buildingInfo(BuildingType.Woodcutter);
+    for (const point of sim.world.grid.pointsWithin(store.point, 6)) {
+      const distance = sim.world.grid.distance(store.point, point);
+      if (distance < 2 || distance >= nearest) continue;
+      if (sim.world.grid.distance(hq.point, point) <= distance + 2) continue;
+      const space = evaluateBuildSpace(sim.world, point, PLAYER);
+      if (space === BuildSpace.None || !canHostSize(space, hutInfo.size)) continue;
+      nearest = distance;
+      hutPoint = point;
+    }
+    expect(hutPoint).toBeDefined();
+    expect(sim.placeBuilding(PLAYER, hutPoint!, BuildingType.Woodcutter).ok).toBe(true);
+    const hut = sim.buildings.find((building) => building.point === hutPoint)!;
+    expect(
+      sim.placeRoad(PLAYER, planRoad(sim.world, store.flagPoint, hut.flagPoint, PLAYER)!).ok,
+    ).toBe(true);
+
+    let man: Settler | undefined;
+    for (let i = 0; i < 8000 && !man; i += 1) {
+      sim.update();
+      const candidate = hut.worker ? sim.settlers.get(hut.worker) : undefined;
+      if (candidate && candidate.building === hut.id && candidate.state === SettlerState.AtWork) {
+        man = candidate;
+      }
+    }
+    expect(man).toBeDefined();
+
+    // Tear up every road, so no store can be reached along one and the choice
+    // falls back on the ground he will actually be crossing.
+    for (const road of sim.roads.all()) sim.demolishRoad(PLAYER, road.points[1]!);
+    expect(sim.demolishBuilding(PLAYER, hut.point).ok).toBe(true);
+
+    // He is beside the storehouse. Walking to the headquarters — merely the
+    // oldest building he owns — was most of the way across the province.
+    expect(man!.building).toBe(store.id);
   });
 });

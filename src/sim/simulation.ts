@@ -134,7 +134,20 @@ function queueAt(flag: Flag): number {
  * How long a building must find nothing before it says so — two full minutes at
  * five ticks a second. Short of that it is simply between trips.
  */
-const EXHAUSTED_REPORT_TICKS = 600;
+export const EXHAUSTED_REPORT_TICKS = 600;
+
+/**
+ * How often a building goes on saying it has nothing to do, once it has said so
+ * the first time.
+ *
+ * Five minutes at five ticks a second. Said once and never again, the notice
+ * scrolls out of the ticker and a woodcutter stands idle for the rest of the
+ * game with nothing to remind the player it is there; said every tick it would
+ * bury everything else. The repeat stops of its own accord — `exhaustedFor`
+ * resets the moment the building finds work — so the only way to silence a
+ * genuinely finished one is to pull it down, which is the point.
+ */
+export const EXHAUSTED_REPEAT_TICKS = 1500;
 
 /**
  * How long a worker rests indoors between trips out.
@@ -191,6 +204,26 @@ export const SETTLERS_KEPT_BACK = 8;
  * to open the frontier once, and no more.
  */
 export const STARTING_GARRISON = 6;
+
+/**
+ * How many men hold an outpost that faces nobody.
+ *
+ * A building must have somebody in it to hold ground at all, and inland there
+ * is nothing for a second man to do. Manning every barracks to the brim tied up
+ * the whole army garrisoning quiet country; one man each frees it to go where
+ * the fighting is. Buildings that do face an enemy take their full complement —
+ * see `manTheWalls`. Both of these are to become player settings.
+ */
+export const MINIMUM_GARRISON = 1;
+
+/**
+ * How long a store takes to turn a settler and his kit into a soldier.
+ *
+ * Thirty seconds at five ticks a second — the same rate at which the province
+ * takes in a new settler, so recruiting and growth run neck and neck instead of
+ * an armoury's backlog emptying the reserve in a single tick.
+ */
+export const TRAINING_TICKS = 150;
 
 /**
  * How often a new settler turns up at the headquarters — every thirty seconds.
@@ -368,6 +401,15 @@ export class Simulation {
   readonly events: GameMessage[] = [];
 
   private rng: Rng;
+  /**
+   * Military buildings that look across at another player's ground, by id.
+   *
+   * Derived from the map, not saved: rebuilt on the sweep beat, and empty for
+   * the first few ticks after a load, which costs a garrison nothing.
+   */
+  private readonly frontierPosts = new Set<number>();
+  /** Store points with somebody on the step between the door and the flag. */
+  private readonly busyDoorways = new Set<number>();
   /** Points holding a sapling that has not finished growing. */
   private growingTrees: number[] = [];
   /** Points holding corn that has not finished ripening. */
@@ -571,13 +613,15 @@ export class Simulation {
     const path = roadPointPath(this.network, this.roads, storeFlag, flagId);
     if (!path) return fail('No road runs from a store to that flag.');
 
+    if (!this.takeTheDoorway(store)) return fail('Somebody is already on the way out.');
+
     store.reserve -= 1;
     if (tool !== null) store.stock[tool] = store.stock[tool]! - 1;
 
-    const settler = this.createSettler(player, Profession.Geologist, store.flagPoint);
+    const settler = this.createSettler(player, Profession.Geologist, store.point);
     settler.surveyFrom = point;
     settler.state = SettlerState.WalkingToJob;
-    this.setPath(settler, path);
+    this.setPath(settler, [store.flagPoint, ...path]);
 
     this.note('A geologist sets out.', MessageCategory.Survey, point);
     return OK;
@@ -594,6 +638,9 @@ export class Simulation {
     this.network.invalidateTraffic();
 
     this.updateSettlers();
+    // After they have moved and before anybody else is sent out, so a store
+    // knows whether its own doorstep is clear.
+    this.surveyDoorways();
     this.updateBuildings();
     this.updateRoads();
     this.growTrees();
@@ -604,7 +651,9 @@ export class Simulation {
       // Re-aim first, then count: the sweep changes where crates are bound, and
       // the reservations have to agree with where they end up.
       this.retargetStrandedWares();
+      this.turnBackDistantSupply();
       this.reconcileIncoming();
+      this.surveyFrontier();
     }
   }
 
@@ -853,6 +902,9 @@ export class Simulation {
 
     if (building.worker) this.dismissSettler(building.worker);
     if (building.garrison.length > 0) this.disbandGarrison(building);
+    // Ids are recycled, so a stale entry here would quietly over-man whatever
+    // building is created next.
+    this.frontierPosts.delete(building.id);
 
     // Wares already on the road to a building that no longer exists need a new
     // home, or they would circle forever.
@@ -2316,6 +2368,13 @@ export class Simulation {
     settler.carrying = null;
     settler.carryDestination = 0;
 
+    // A carrier stepping back out of a store uses the same one-man doorway as
+    // anybody the store is sending out. He is not being dispatched, but to the
+    // player he is simply a second man coming through the door at once, which
+    // is the thing being fixed. He waits inside a moment instead; the man on
+    // the step is walking and will be off it within a pace.
+    if (building && isStore(building) && !this.takeTheDoorway(building)) return;
+
     const flagPoint = building ? building.flagPoint : settler.point;
     const back = walkablePath(this.world, settler.point, flagPoint);
     this.setPath(settler, back ?? []);
@@ -2643,7 +2702,8 @@ export class Simulation {
     // another dips in and out of having nothing to cut all day long, and saying
     // so each time buried every other message; two solid minutes of finding
     // nothing at all is a different matter.
-    if (building.exhaustedFor !== EXHAUSTED_REPORT_TICKS) return;
+    if (building.exhaustedFor < EXHAUSTED_REPORT_TICKS) return;
+    if ((building.exhaustedFor - EXHAUSTED_REPORT_TICKS) % EXHAUSTED_REPEAT_TICKS !== 0) return;
 
     const info = buildingInfo(building.type);
     this.note(
@@ -2894,12 +2954,22 @@ export class Simulation {
       const target = this.buildings.get(destination.building);
       if (!target || outstandingDemand(target, ware) <= 0) continue;
 
+      // Let the nearest store serve. Every store pushes on its own account, so
+      // whichever acted first won the reservation — and since the headquarters
+      // is the busy one, it was forever standing down on its own crowded flag
+      // while a storehouse three times further away sent the boards.
+      if (this.nearerStoreHolds(building, ware, destination.flag)) continue;
+
       // Somebody has to carry it out, and only once there is genuinely
       // something to carry — a store with nothing to send needs no porter. He
       // is free again only when he is back inside, which is what paces a
       // store's dispatching.
+      // One door, and the porter queues at it like everybody else: a man
+      // carrying a crate out and a worker leaving for a job cannot share the
+      // step.
       const porter = this.storePorter(building);
       if (!porter) return;
+      if (!this.takeTheDoorway(building)) return;
 
       building.stock[ware] = building.stock[ware]! - 1;
       this.reserveIncoming(destination.building, ware);
@@ -2939,6 +3009,145 @@ export class Simulation {
     porter.state = SettlerState.AtWork;
     building.worker = porter.id;
     return porter;
+  }
+
+  /**
+   * Whether some other store is better placed to send this ware.
+   *
+   * "Better placed" means nearer along the roads *and* able to act: a store
+   * whose own doorstep is full cannot send anything, and must not be allowed to
+   * block one that can, or the site would simply starve. Ties go to the lower
+   * id so the answer never depends on the order buildings happen to be visited
+   * in.
+   */
+  private nearerStoreHolds(store: Building, ware: Ware, destinationFlag: number): boolean {
+    const ownFlag = this.world.flag[store.flagPoint];
+    if (!ownFlag) return false;
+
+    const ownCost = ownFlag === destinationFlag ? 0 : this.network.cost(ownFlag, destinationFlag);
+    if (ownCost === undefined) return false;
+
+    let nearer = false;
+    this.buildings.forEach((other) => {
+      if (nearer || other.id === store.id) return;
+      if (other.owner !== store.owner || !isStore(other)) return;
+      if ((other.stock[ware] ?? 0) <= 0) return;
+
+      const flagId = this.world.flag[other.flagPoint];
+      if (!flagId) return;
+
+      const flag = this.flags.get(flagId);
+      if (!flag || flag.wares.length >= STORE_DISPATCH_LIMIT) return;
+
+      const cost = flagId === destinationFlag ? 0 : this.network.cost(flagId, destinationFlag);
+      if (cost === undefined) return;
+
+      if (cost < ownCost || (cost === ownCost && other.id < store.id)) nearer = true;
+    });
+
+    return nearer;
+  }
+
+  /**
+   * The store nearest a flag that has a ware to send and room to send it.
+   *
+   * Returns the store together with what it would cost to carry the ware from
+   * its door to that flag, since every caller wants both.
+   */
+  private nearestSupplier(
+    owner: number,
+    ware: Ware,
+    destinationFlag: number,
+  ): { store: Building; flag: number; cost: number } | undefined {
+    let best: { store: Building; flag: number; cost: number } | undefined;
+
+    this.buildings.forEach((store) => {
+      if (store.owner !== owner || !isStore(store)) return;
+      if ((store.stock[ware] ?? 0) <= 0) return;
+
+      const flagId = this.world.flag[store.flagPoint];
+      if (!flagId) return;
+
+      const flag = this.flags.get(flagId);
+      if (!flag || flag.wares.length >= STORE_DISPATCH_LIMIT) return;
+
+      const cost = flagId === destinationFlag ? 0 : this.network.cost(flagId, destinationFlag);
+      if (cost === undefined) return;
+
+      if (!best || cost < best.cost || (cost === best.cost && store.id < best.store.id)) {
+        best = { store, flag: flagId, cost };
+      }
+    });
+
+    return best;
+  }
+
+  /**
+   * Sends back a crate that set out from the wrong store.
+   *
+   * Correcting the rule only fixes what has not left yet; a site already being
+   * supplied from across the province would go on being supplied from there.
+   *
+   * Turning one back is only worth doing when it is less walking altogether:
+   * carrying it into the nearest store from where it stands, and then out
+   * again from whichever store is nearest the site, must come to less than
+   * simply finishing the journey. That is a genuine saving rather than churn,
+   * and it is why a crate almost at its destination is left alone while one
+   * still sitting on the doorstep it left is taken straight back in.
+   *
+   * Once it is in stock the site's demand reopens and `nearerStoreHolds` has
+   * the near store serve it.
+   */
+  private turnBackDistantSupply(): void {
+    this.flags.forEach((flag) => {
+      for (const parcel of flag.wares) {
+        const destination = this.buildings.get(parcel.destination);
+        if (!destination || isStore(destination)) continue;
+
+        const destinationFlag = this.world.flag[destination.flagPoint];
+        if (!destinationFlag || destinationFlag === flag.id) continue;
+
+        const remaining = this.network.cost(flag.id, destinationFlag);
+        if (remaining === undefined) continue;
+
+        const home = this.nearestStoreByRoad(destination.owner, flag.id);
+        if (!home) continue;
+
+        const supplier = this.nearestSupplier(destination.owner, parcel.ware, destinationFlag);
+        // Sending it back to the very store that would serve the site is a
+        // round trip for nothing.
+        if (!supplier || supplier.store.id === home.store.id) continue;
+
+        if (home.cost + supplier.cost >= remaining) continue;
+
+        this.releaseIncoming(parcel.destination, parcel.ware);
+        parcel.destination = home.store.id;
+      }
+    });
+  }
+
+  /** The store nearest a flag along the roads, and what it costs to reach. */
+  private nearestStoreByRoad(
+    owner: number,
+    flagId: number,
+  ): { store: Building; cost: number } | undefined {
+    let best: { store: Building; cost: number } | undefined;
+
+    this.buildings.forEach((store) => {
+      if (store.owner !== owner || !isStore(store)) return;
+
+      const storeFlag = this.world.flag[store.flagPoint];
+      if (!storeFlag) return;
+
+      const cost = storeFlag === flagId ? 0 : this.network.cost(storeFlag, flagId);
+      if (cost === undefined) return;
+
+      if (!best || cost < best.cost || (cost === best.cost && store.id < best.store.id)) {
+        best = { store, cost };
+      }
+    });
+
+    return best;
   }
 
   /** Records that a ware is on its way, so nobody orders it twice. */
@@ -3097,26 +3306,23 @@ export class Simulation {
 
   // ------------------------------------------------------- staffing & roads
 
-  private storeFor(owner: number): Building | undefined {
-    let best: Building | undefined;
-    this.buildings.forEach((building) => {
-      if (best) return;
-      if (building.owner === owner && isStore(building)) best = building;
-    });
-    return best;
-  }
-
   /**
    * The store a settler at `from` should walk back to.
    *
    * Distance by road decides it, mirroring `supplierFor` in the other
-   * direction; a settler with no road under him falls back on the first store,
-   * since he will be crossing open ground anyway.
+   * direction. Where the roads cannot answer — a man whose building, flag and
+   * road have all just been pulled down together stands in open country with no
+   * network to measure from — the answer is the store he is nearest to across
+   * the ground, because that is the way he will be walking.
+   *
+   * Falling through to "the first store there is" put a woodcutter felled
+   * beside his own storehouse on a walk right across the province to the
+   * headquarters, which is merely the oldest building a player owns.
    */
   private nearestStore(owner: number, from: number): Building | undefined {
     const doorstep = this.flagPointOf(from);
     const fromFlag = doorstep === undefined ? 0 : this.world.flag[doorstep];
-    if (!fromFlag) return this.storeFor(owner);
+    if (!fromFlag) return this.closestStoreAcrossGround(owner, from);
 
     let best: Building | undefined;
     let bestCost = Number.POSITIVE_INFINITY;
@@ -3134,7 +3340,25 @@ export class Simulation {
       best = building;
     });
 
-    return best ?? this.storeFor(owner);
+    return best ?? this.closestStoreAcrossGround(owner, from);
+  }
+
+  /** The store nearest as the crow flies, for a settler with no roads to use. */
+  private closestStoreAcrossGround(owner: number, from: number): Building | undefined {
+    let best: Building | undefined;
+    let bestDistance = Number.POSITIVE_INFINITY;
+
+    this.buildings.forEach((building) => {
+      if (building.owner !== owner || !isStore(building)) return;
+
+      const distance = this.world.grid.distance(from, building.point);
+      if (distance >= bestDistance) return;
+
+      bestDistance = distance;
+      best = building;
+    });
+
+    return best;
   }
 
   /** The cheapest store that can supply a settler, and optionally a tool. */
@@ -3178,6 +3402,15 @@ export class Simulation {
       if ((store.stock[ware] ?? 0) <= 0) return;
     }
 
+    // One man at a time. A store makes nothing, so its `workTimer` is free to
+    // be the training clock — no new field, and saves and the fingerprint carry
+    // it already. The clock only runs while a man could actually be trained,
+    // and is not wound back when he could not, so weapons arriving in dribs and
+    // drabs still add up to a soldier.
+    store.workTimer += 1;
+    if (store.workTimer < TRAINING_TICKS) return;
+    store.workTimer = 0;
+
     for (const ware of SOLDIER_COST) store.stock[ware] = store.stock[ware]! - 1;
     store.reserve -= 1;
     store.garrison[Rank.Private] = (store.garrison[Rank.Private] ?? 0) + 1;
@@ -3190,12 +3423,90 @@ export class Simulation {
    * reaches it, which is what makes the weapon chain the price of expanding
    * rather than a luxury bought afterwards.
    */
-  private manTheWalls(building: Building, wanted: number): void {
+  private manTheWalls(building: Building, full: number): void {
     const held = garrisonStrength(building.garrison);
     building.status = held > 0 ? BuildingStatus.Working : BuildingStatus.Unmanned;
 
+    // Quiet country is held by one man; a building that actually looks across at
+    // somebody else's ground takes everybody it has room for.
+    const wanted = this.frontierPosts.has(building.id)
+      ? full
+      : Math.min(MINIMUM_GARRISON, full);
+
     if (held + building.garrisonRequested >= wanted) return;
     this.requestSoldier(building);
+  }
+
+  /**
+   * Which stores have somebody on the step between their door and their flag.
+   *
+   * A store has one doorway and it is one man wide. Left ungated, a
+   * headquarters asked for four workers, a builder and a carrier in the same
+   * tick put all six on the flag at once, which looks like a conjuring trick
+   * rather than a settlement.
+   *
+   * Read off the world rather than remembered: entity ids are recycled here,
+   * and a remembered one has twice been the cause of a bug. A single pass over
+   * the settlers catches porters carrying goods out and men leaving for a job
+   * alike, since both take the same step. Only the outward leg counts — a man
+   * walking *back* in must not hold the door, or a store's dispatching would
+   * stall behind its own returning traffic.
+   */
+  private surveyDoorways(): void {
+    this.busyDoorways.clear();
+
+    this.settlers.forEach((settler) => {
+      if (settler.fromPoint === settler.toPoint) return;
+
+      const buildingId = this.world.building[settler.fromPoint];
+      if (!buildingId) return;
+
+      const store = this.buildings.get(buildingId);
+      if (!store || !isStore(store)) return;
+      if (settler.toPoint !== store.flagPoint) return;
+
+      this.busyDoorways.add(store.point);
+    });
+  }
+
+  /**
+   * Whether a store can let somebody out, and claims the doorway if so.
+   *
+   * Claiming it here as well as in the sweep is what makes the gate hold
+   * *within* a tick: two buildings asking the same store for a man in the same
+   * tick would otherwise both see a clear step.
+   */
+  private takeTheDoorway(store: Building): boolean {
+    if (this.busyDoorways.has(store.point)) return false;
+    this.busyDoorways.add(store.point);
+    return true;
+  }
+
+  /**
+   * Which military buildings look across at another player's ground.
+   *
+   * Rebuilt whole every sweep rather than kept up to date: a fortress's radius
+   * is thirteen nodes, some five hundred points, and asking that question every
+   * tick of every outpost would cost more than everything else in the loop put
+   * together. Borders move rarely, and a garrison a few seconds late to a new
+   * frontier is not a fault.
+   */
+  private surveyFrontier(): void {
+    this.frontierPosts.clear();
+
+    this.buildings.forEach((building) => {
+      const behaviour = buildingInfo(building.type).behaviour;
+      if (behaviour.kind !== 'military') return;
+      if (building.state !== BuildingState.Complete) return;
+
+      for (const point of this.world.grid.pointsWithin(building.point, behaviour.radius)) {
+        const owner = this.world.owner[point];
+        if (owner !== 0 && owner !== building.owner) {
+          this.frontierPosts.add(building.id);
+          return;
+        }
+      }
+    });
   }
 
   /**
@@ -3212,20 +3523,25 @@ export class Simulation {
     const store = this.garrisonSupplierFor(building.owner, destinationFlag);
     if (!store) return;
 
-    const rank = strongestIn(store.garrison);
+    // The best men go where they are needed and the rest hold the quiet
+    // country, which is the whole point of promoting anybody.
+    const rank = this.frontierPosts.has(building.id)
+      ? strongestIn(store.garrison)
+      : weakestIn(store.garrison);
     if (rank === undefined) return;
 
     const storeFlag = this.world.flag[store.flagPoint]!;
     const path = roadPointPath(this.network, this.roads, storeFlag, destinationFlag);
     if (!path) return;
+    if (!this.takeTheDoorway(store)) return;
 
     store.garrison[rank] = store.garrison[rank]! - 1;
 
-    const settler = this.createSettler(building.owner, Profession.Soldier, store.flagPoint);
+    const settler = this.createSettler(building.owner, Profession.Soldier, store.point);
     settler.rank = rank;
     settler.building = building.id;
     settler.state = SettlerState.WalkingToJob;
-    this.setPath(settler, [...path, building.point]);
+    this.setPath(settler, [store.flagPoint, ...path, building.point]);
     building.garrisonRequested += 1;
   }
 
@@ -3340,14 +3656,15 @@ export class Simulation {
     const storeFlag = this.world.flag[store.flagPoint]!;
     const path = roadPointPath(this.network, this.roads, storeFlag, destinationFlag);
     if (!path) return;
+    if (!this.takeTheDoorway(store)) return;
 
     store.reserve -= 1;
     if (tool !== null) store.stock[tool] = store.stock[tool]! - 1;
 
-    const settler = this.createSettler(building.owner, info.worker, store.flagPoint);
+    const settler = this.createSettler(building.owner, info.worker, store.point);
     settler.building = building.id;
     settler.state = SettlerState.WalkingToJob;
-    this.setPath(settler, [...path, building.point]);
+    this.setPath(settler, [store.flagPoint, ...path, building.point]);
     building.workerRequested = true;
   }
 
@@ -3362,13 +3679,15 @@ export class Simulation {
     const path = roadPointPath(this.network, this.roads, storeFlag, destinationFlag);
     if (!path) return;
 
+    if (!this.takeTheDoorway(store)) return;
+
     store.reserve -= 1;
     store.stock[Ware.Hammer] = store.stock[Ware.Hammer]! - 1;
 
-    const settler = this.createSettler(building.owner, Profession.Builder, store.flagPoint);
+    const settler = this.createSettler(building.owner, Profession.Builder, store.point);
     settler.building = building.id;
     settler.state = SettlerState.WalkingToJob;
-    this.setPath(settler, [...path, building.point]);
+    this.setPath(settler, [store.flagPoint, ...path, building.point]);
 
     building.worker = settler.id;
     building.workerRequested = true;
@@ -3397,6 +3716,7 @@ export class Simulation {
 
       const toRoad = roadPointPath(this.network, this.roads, storeFlag, nearest.flag);
       if (!toRoad) return;
+      if (!this.takeTheDoorway(store)) return;
 
       store.reserve -= 1;
 
@@ -3404,10 +3724,10 @@ export class Simulation {
       // arrives he is an ordinary carrier: `lookForWork` runs before
       // `strollToPost`, so a crate already waiting is picked up at once and the
       // walk to the middle happens only when there is nothing to carry.
-      const settler = this.createSettler(road.owner, Profession.Helper, store.flagPoint);
+      const settler = this.createSettler(road.owner, Profession.Helper, store.point);
       settler.road = road.id;
       settler.state = SettlerState.WalkingToJob;
-      this.setPath(settler, toRoad);
+      this.setPath(settler, [store.flagPoint, ...toRoad]);
       road.carrierRequested = true;
     });
   }
@@ -3855,6 +4175,14 @@ function keepsSoldiers(info: BuildingInfo): boolean {
 /** The highest rank present in a garrison, or undefined when it is empty. */
 function strongestIn(garrison: readonly number[]): number | undefined {
   for (let rank = garrison.length - 1; rank >= 0; rank -= 1) {
+    if ((garrison[rank] ?? 0) > 0) return rank;
+  }
+  return undefined;
+}
+
+/** The lowest rank present in a garrison, or undefined when it is empty. */
+function weakestIn(garrison: readonly number[]): number | undefined {
+  for (let rank = 0; rank < garrison.length; rank += 1) {
     if ((garrison[rank] ?? 0) > 0) return rank;
   }
   return undefined;

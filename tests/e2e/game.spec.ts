@@ -349,10 +349,10 @@ test('a barracks says how many soldiers hold it', async ({ page }) => {
   await expect(panel).toContainText('Garrison: 0 of 2', { timeout: 120_000 });
   await expect(panel).toContainText('Waiting for soldiers');
 
-  // Then the men arrive, and the panel says who they are. Both places fill —
-  // asserting on one man in particular is a race, since two can arrive between
-  // one poll and the next.
-  await expect(panel).toContainText('Garrison: 2 of 2', { timeout: 120_000 });
-  await expect(panel).toContainText('Private: 2');
+  // Then a man arrives, and the panel says who he is. One man, not two: an
+  // outpost facing nobody is held by the fewest the rule allows, so the rest of
+  // the army is free to go where it is needed.
+  await expect(panel).toContainText('Garrison: 1 of 2', { timeout: 120_000 });
+  await expect(panel).toContainText('Private: 1');
   await expect(panel).toContainText('Working');
 });
