@@ -1,4 +1,5 @@
 import '../styles/main.scss';
+import { getHandoff, rollSeed, setHandoff } from '../platform/handoff';
 import { loadSimulation } from '../platform/save';
 import { getSave } from '../platform/storage';
 import type { Simulation } from '../sim/simulation';
@@ -10,14 +11,16 @@ import { GameSession } from './session';
  * The game page.
  *
  * It is its own document, reached at `game/`, so the title screen is a plain
- * page that can be opened, bookmarked and cached on its own. Everything the
- * game needs to start arrives in the query string, because a page load leaves
- * nothing else standing:
+ * page that can be opened, bookmarked and cached on its own. What to open is
+ * settled before arriving here, and read back in this order:
  *
- *  - `?save=<id>`  resume that slot, which is how Continue and Load a save
- *                  both arrive — the title picks the slot, this plays it;
- *  - `?seed=<n>`   a new island from that seed;
- *  - neither       a new island from a seed of the moment.
+ *  1. `?seed=<n>` in this page's own URL — a seed a person named, and the only
+ *     query parameter there is. It wins, and it leaves the handoff alone, so
+ *     deep-linking an island cannot clobber a save waiting to be opened.
+ *  2. the handoff written by the title screen (`platform/handoff`): a slot to
+ *     resume, or the seed it settled on for a new island.
+ *  3. neither, for somebody who typed `game/` straight in: a seed of the
+ *     moment, kept so that a reload raises the same island rather than another.
  */
 
 /** A map this size generates in a fraction of a second and gives room to grow. */
@@ -69,49 +72,59 @@ function startSession(simulation: Simulation): void {
 }
 
 /**
- * A seed given as `?seed=12345`.
+ * A seed given as `?seed=12345`, which is the whole of this page's URL surface.
  *
  * World generation is a pure function of its seed, so naming one reproduces
  * exactly the same island — useful for comparing notes on a map, for reporting
- * a problem, and for tests that need the same ground every run. The title
- * screen passes its own `?seed=` through, so a seed named there survives the
- * step across to here.
+ * a problem, and for tests that need the same ground every run.
  */
-function requestedSeed(params: URLSearchParams): number | null {
-  const raw = params.get('seed');
+function namedSeed(): number | null {
+  const raw = new URLSearchParams(window.location.search).get('seed');
   if (raw === null) return null;
 
   const seed = Number.parseInt(raw, 10);
   return Number.isFinite(seed) ? seed >>> 0 : null;
 }
 
-async function startNewGame(seed: number | null): Promise<void> {
+/**
+ * Raises an island.
+ *
+ * `named` is what separates a seed a person asked for from one that was rolled:
+ * some seeds produce ground with nowhere sensible to start, and retrying a
+ * named one would only fail the same way, so it is reported instead. A rolled
+ * seed is replaced — and the replacement recorded, or a reload would raise a
+ * third island and disagree with the screen.
+ */
+async function startNewGame(seed: number, named: boolean): Promise<void> {
   showBusy('Raising an island…');
 
   // Yield a frame so the message actually paints before generation blocks.
   await new Promise((resolve) => requestAnimationFrame(resolve));
-
-  const chosen = seed ?? Math.floor(Math.random() * 0xffff_ffff);
 
   try {
     startSession(
       Game.create({
         width: MAP_SIZE,
         height: MAP_SIZE,
-        seed: chosen,
+        seed,
         players: [{ name: 'You', colour: '#c4832b' }],
       }),
     );
   } catch (error) {
-    // Some seeds produce an island with nowhere sensible to start. Retrying a
-    // *named* seed would only fail the same way, so that one is reported.
-    if (seed !== null) {
+    if (named) {
       showTrouble(`No island could be raised from seed ${seed}.`);
       return;
     }
     console.warn('world generation failed, retrying with a new seed', error);
-    void startNewGame(null);
+    void raiseFreshIsland();
   }
+}
+
+/** Rolls a seed, records it so a reload keeps the island, and builds it. */
+function raiseFreshIsland(): Promise<void> {
+  const seed = rollSeed();
+  setHandoff({ kind: 'new', seed });
+  return startNewGame(seed, false);
 }
 
 async function resumeSlot(id: string): Promise<void> {
@@ -129,9 +142,16 @@ async function resumeSlot(id: string): Promise<void> {
   }
 }
 
-const params = new URLSearchParams(window.location.search);
-const slot = params.get('save');
-void (slot ? resumeSlot(slot) : startNewGame(requestedSeed(params)));
+void (() => {
+  const named = namedSeed();
+  if (named !== null) return startNewGame(named, true);
+
+  const intent = getHandoff();
+  if (intent?.kind === 'save') return resumeSlot(intent.id);
+  if (intent?.kind === 'new') return startNewGame(intent.seed, false);
+
+  return raiseFreshIsland();
+})();
 
 // The service worker is what makes the game work with no connection at all.
 // It is only generated for production builds.

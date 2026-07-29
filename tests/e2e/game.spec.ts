@@ -21,9 +21,55 @@ async function startNewGame(page: Page, seed = TEST_SEED): Promise<void> {
   await expect(page.locator('.title__name')).toHaveText('Bailiwick');
 
   await page.getByRole('button', { name: 'New game' }).click();
-  await page.waitForURL(/game\/\?seed=/);
+  // Nothing in the address bar: what to play travels in storage now.
+  await page.waitForURL((url) => url.pathname.endsWith('/game/') && url.search === '');
   await expect(page.locator('canvas.map')).toBeVisible();
   await expect(page.locator('.hud__bar')).toBeVisible();
+}
+
+/**
+ * A coarse fingerprint of the island on screen: the average colour of each
+ * cell of a grid over the map canvas.
+ *
+ * Comparing screenshots byte for byte across a page load is no good — a couple
+ * of hundred pixels differ between two loads of the very same seed, for
+ * reasons that have nothing to do with the ground. Averaging over cells throws
+ * that away while leaving a different island unmistakable.
+ */
+async function islandFingerprint(page: Page): Promise<number[]> {
+  return page.locator('canvas.map').evaluate((node) => {
+    const canvas = node as HTMLCanvasElement;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) throw new Error('the map canvas has no 2d context');
+
+    const CELLS = 12;
+    const cellWidth = Math.max(1, Math.floor(canvas.width / CELLS));
+    const cellHeight = Math.max(1, Math.floor(canvas.height / CELLS));
+
+    const out: number[] = [];
+    for (let row = 0; row < CELLS; row += 1) {
+      for (let column = 0; column < CELLS; column += 1) {
+        const { data } = ctx.getImageData(
+          column * cellWidth,
+          row * cellHeight,
+          cellWidth,
+          cellHeight,
+        );
+        let total = 0;
+        for (let i = 0; i < data.length; i += 4) {
+          total += data[i]! + data[i + 1]! + data[i + 2]!;
+        }
+        out.push(Math.round(total / (data.length / 4) / 3));
+      }
+    }
+    return out;
+  });
+}
+
+/** How many cells of two fingerprints are more than a shade apart. */
+function cellsApart(a: number[], b: number[]): number {
+  expect(a).toHaveLength(b.length);
+  return a.filter((value, i) => Math.abs(value - b[i]!) > 3).length;
 }
 
 /** Waits for the title page, which quitting now navigates to. */
@@ -524,4 +570,69 @@ test('the title illustration is shown whole', async ({ page }) => {
   // screen the box collapsed to two pixels and the picture vanished, while the
   // svg inside went on reporting its full size.
   expect(framing.frameHeight).toBeGreaterThanOrEqual(framing.height);
+});
+
+test('the address bar carries nothing but a seed you asked for', async ({ page }) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: 'New game' }).click();
+  await expect(page.locator('canvas.map')).toBeVisible();
+
+  // A slot id is an internal name and has no business being shown, copied or
+  // handed to anybody. Nothing at all goes in the query for an ordinary game.
+  expect(new URL(page.url()).search).toBe('');
+
+  await page.getByRole('button', { name: 'Menu' }).click();
+  await page.getByRole('button', { name: 'Save game' }).click();
+  await expect(page.locator('.hud__ticker')).toContainText('saved');
+
+  await page.getByRole('button', { name: 'Menu' }).click();
+  await page.getByRole('button', { name: 'Quit to title' }).click();
+  await page.getByRole('button', { name: 'Quit without saving' }).click();
+  await expectTitle(page);
+
+  await page.getByRole('button', { name: /^Continue/ }).click();
+  await expect(page.locator('canvas.map')).toBeVisible();
+  expect(new URL(page.url()).searchParams.get('save')).toBeNull();
+  expect(new URL(page.url()).search).toBe('');
+});
+
+test('a named seed still works by hand', async ({ page }) => {
+  // The one thing that stays in the open: a seed is meant to be typed and
+  // shared, since the island is a pure function of it.
+  await page.goto(`/game/?seed=${TEST_SEED}`);
+  await expect(page.locator('canvas.map')).toBeVisible();
+  await expect(page.locator('.hud__bar')).toBeVisible();
+  expect(new URL(page.url()).searchParams.get('seed')).toBe(String(TEST_SEED));
+  await page.waitForTimeout(1000);
+  const island = await islandFingerprint(page);
+
+  // The same seed again is the same ground.
+  await page.goto(`/game/?seed=${TEST_SEED}`);
+  await expect(page.locator('canvas.map')).toBeVisible();
+  await page.waitForTimeout(1000);
+  expect(cellsApart(island, await islandFingerprint(page))).toBe(0);
+
+  // And it is really the seed doing the work rather than the page ignoring it:
+  // another seed raises somewhere else entirely.
+  await page.goto(`/game/?seed=${TEST_SEED + 1}`);
+  await expect(page.locator('canvas.map')).toBeVisible();
+  await page.waitForTimeout(1000);
+  expect(cellsApart(island, await islandFingerprint(page))).toBeGreaterThan(10);
+});
+
+test('reloading the game keeps the island it was showing', async ({ page }) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: 'New game' }).click();
+  await expect(page.locator('canvas.map')).toBeVisible();
+  await page.waitForTimeout(1200);
+
+  const before = await islandFingerprint(page);
+
+  // The seed used to be rolled here and written down nowhere, so a refresh
+  // threw the province away and raised a different one.
+  await page.reload();
+  await expect(page.locator('canvas.map')).toBeVisible();
+  await page.waitForTimeout(1200);
+
+  expect(cellsApart(before, await islandFingerprint(page))).toBe(0);
 });

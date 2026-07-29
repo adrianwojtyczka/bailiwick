@@ -16,8 +16,14 @@ import sceneSvg from './scene.svg?raw';
 export interface TitleCallbacks {
   /** Start a brand new province. */
   newGame(): void;
-  /** Open the game on a save already in storage. */
-  playSave(id: string): void;
+  /**
+   * Open the game on a save already in storage.
+   *
+   * Returns a message when it cannot — which slot to open travels in storage,
+   * and a browser that refuses to keep it must say so rather than quietly
+   * raising a new island and looking as though the save had been lost.
+   */
+  playSave(id: string): string | undefined;
 }
 
 function svg(markup: string, className: string): HTMLElement {
@@ -157,7 +163,7 @@ export class TitleScreen {
         this.say('There is no game to continue.');
         return;
       }
-      this.callbacks.playSave(newest.id);
+      this.play(newest.id);
     } catch (error) {
       this.say(`Could not continue: ${describe(error)}`);
     }
@@ -180,7 +186,7 @@ export class TitleScreen {
 
       const id = `slot-${Date.now()}`;
       await putSave(id, { ...meta, name: meta.name || file.name, savedAt: Date.now() }, bytes);
-      this.callbacks.playSave(id);
+      this.play(id);
     } catch (error) {
       this.say(`Could not read that file: ${describe(error)}`);
     }
@@ -232,7 +238,7 @@ export class TitleScreen {
         this.say('That save has gone.');
         return;
       }
-      this.callbacks.playSave(id);
+      this.play(id);
     } catch (error) {
       this.say(`Could not load that save: ${describe(error)}`);
     }
@@ -245,6 +251,12 @@ export class TitleScreen {
     } catch (error) {
       this.say(`Could not delete that save: ${describe(error)}`);
     }
+  }
+
+  /** Hands a slot over to the game page, or reports why it cannot. */
+  private play(id: string): void {
+    const trouble = this.callbacks.playSave(id);
+    if (trouble) this.say(trouble);
   }
 
   private say(message: string): void {
