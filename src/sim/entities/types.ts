@@ -101,6 +101,19 @@ export interface Building {
   readonly stock: number[];
   /** Settlers waiting here to be sent out to jobs. */
   reserve: number;
+
+  // ---- soldiers
+  /**
+   * Men by rank: for a store, those trained and waiting to march; for a
+   * military building, those holding it. Empty for everything else, and absent
+   * in saves older than version 5.
+   */
+  readonly garrison: number[];
+  /**
+   * Soldiers already walking here, so a fortress asks for nine men once rather
+   * than nine times a second. Rebuilt from the world by `reconcileIncoming`.
+   */
+  garrisonRequested: number;
 }
 
 export const BuildingStatus = {
@@ -114,6 +127,8 @@ export const BuildingStatus = {
   UnderConstruction: 5,
   /** No road links this to a store, so nothing can ever reach it. */
   Unreachable: 6,
+  /** A military building with no soldiers in it, holding nothing. */
+  Unmanned: 7,
 } as const;
 
 export type BuildingStatus = (typeof BuildingStatus)[keyof typeof BuildingStatus];
@@ -184,6 +199,12 @@ export interface Settler {
    * everyone else, and absent in saves older than version 3.
    */
   surveyFrom: number;
+  /**
+   * A soldier's rank while he is on the march, so the man who arrives is the
+   * man who set out. Zero for everyone else, and absent in saves older than
+   * version 5.
+   */
+  rank: number;
 }
 
 /** Ticks a settler takes to cross one lattice step on level ground. */

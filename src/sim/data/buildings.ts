@@ -616,6 +616,10 @@ export const BUILDINGS: readonly BuildingInfo[] = [
         { ware: Ware.Coal, count: 1 },
       ],
       output: Ware.Sword,
+      // A soldier needs one of each, so an armoury that only ever forged swords
+      // left half a barracks unarmed. `alternatives` makes it work on whichever
+      // the player is shorter of, exactly as the metalworks does with tools.
+      alternatives: [Ware.Sword, Ware.Shield],
       workTicks: 180,
     },
     available: true,

@@ -1,5 +1,6 @@
 import { buildingInfo } from '../data/buildings';
-import type { Ware } from '../data/wares';
+import { TOP_RANK } from '../data/ranks';
+import { Ware } from '../data/wares';
 import type { EntityTable } from '../entities/registry';
 import type { Building } from '../entities/types';
 import { BuildingState } from '../entities/types';
@@ -7,6 +8,23 @@ import type { FlagNetwork } from './flag-graph';
 
 /** How many of each input a production building will hold in stock. */
 export const INPUT_STOCK_LIMIT = 4;
+
+/**
+ * How much gold one military building will have on the road to it at a time.
+ *
+ * A fortress with nine privates in it genuinely wants nine coins, but ordering
+ * them all at once would send the mint's whole output to one building while
+ * every other post on the frontier waited. Nothing is stocked — a coin promotes
+ * a man the moment it arrives — so this is purely a limit on the queue.
+ */
+export const COINS_IN_FLIGHT_LIMIT = 2;
+
+/** Men in a garrison who could still be promoted. */
+function promotable(building: Building): number {
+  let total = 0;
+  for (let rank = 0; rank < TOP_RANK; rank += 1) total += building.garrison[rank] ?? 0;
+  return total;
+}
 
 /**
  * How much of an input a building still wants, counting what is already on its
@@ -44,6 +62,14 @@ export function outstandingDemand(building: Building, ware: Ware): number {
     return Math.max(0, INPUT_STOCK_LIMIT - held);
   }
 
+  // Gold is what a garrison wants, and the only thing it wants: one coin, one
+  // promotion. A garrison of generals asks for nothing.
+  if (behaviour.kind === 'military') {
+    if (ware !== Ware.Coin) return 0;
+    const wanted = Math.min(promotable(building), COINS_IN_FLIGHT_LIMIT);
+    return Math.max(0, wanted - (building.inputsIncoming[0] ?? 0));
+  }
+
   return 0;
 }
 
@@ -79,6 +105,13 @@ export function willAccept(building: Building, ware: Ware): boolean {
     let held = 0;
     for (const amount of building.inputs) held += amount;
     return held < INPUT_STOCK_LIMIT;
+  }
+
+  // Judged on the men actually standing there, not on what was ordered: a coin
+  // at the door is spent at once, so the only question is whether anyone is
+  // left to promote.
+  if (behaviour.kind === 'military') {
+    return ware === Ware.Coin && promotable(building) > 0;
   }
 
   return false;
@@ -127,6 +160,10 @@ function heldOf(building: Building, ware: Ware): number {
       held += building.inputs[i]! + building.inputsIncoming[i]!;
     }
     return held;
+  }
+
+  if (behaviour.kind === 'military' && ware === Ware.Coin) {
+    return building.inputsIncoming[0] ?? 0;
   }
 
   return 0;

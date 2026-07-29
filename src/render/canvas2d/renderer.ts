@@ -1,6 +1,8 @@
 import { DIRECTIONS } from '../../sim/core/direction';
 import { OUT_OF_BOUNDS } from '../../sim/core/grid';
+import type { BuildingType } from '../../sim/data/buildings';
 import { BUILDINGS, buildingInfo } from '../../sim/data/buildings';
+import { garrisonStrength } from '../../sim/data/ranks';
 import { wareInfo } from '../../sim/data/wares';
 import { BuildingState, SettlerState } from '../../sim/entities/types';
 import type { Simulation } from '../../sim/simulation';
@@ -17,6 +19,12 @@ import { Camera } from '../camera';
 import { depthOf, pointX, pointY } from '../projection';
 import type { Renderer, ViewState } from '../renderer';
 import { TerrainChunks } from './terrain-chunks';
+
+/** How many men a building of this type has room for, or 0 if it takes none. */
+function garrisonPlaces(type: BuildingType): number {
+  const behaviour = buildingInfo(type).behaviour;
+  return behaviour.kind === 'military' ? behaviour.garrison : 0;
+}
 
 /**
  * How each kind of deposit is marked once a geologist has found it. Fish are
@@ -146,6 +154,7 @@ export class CanvasRenderer implements Renderer {
     this.collectSprites(bounds, view);
     this.flushSprites();
 
+    this.drawGarrisons(bounds);
     if (view.selectedPoint >= 0) this.drawSelection(view.selectedPoint);
   }
 
@@ -312,6 +321,52 @@ export class CanvasRenderer implements Renderer {
         }
       }
     }
+  }
+
+  /**
+   * A row of pips over every military building, one for each man holding it.
+   *
+   * A barracks claims no ground until somebody is standing in it, so "manned"
+   * and "empty" are the difference between a frontier and a shed, and the
+   * player has to be able to tell them apart without opening a panel. Drawn
+   * after the sprites so the pips are never buried by the roof in front.
+   */
+  private drawGarrisons(bounds: ReturnType<Camera['visibleBounds']>): void {
+    const { ctx, camera } = this;
+    const { grid } = this.simulation.world;
+    const radius = Math.max(1.2, 2 * camera.zoom);
+    const gap = radius * 2.6;
+
+    this.simulation.buildings.forEach((building) => {
+      if (building.state !== BuildingState.Complete) return;
+      if (buildingInfo(building.type).behaviour.kind !== 'military') return;
+
+      const row = grid.yOf(building.point);
+      if (row < bounds.minRow - 3 || row > bounds.maxRow + 3) return;
+
+      const wanted = garrisonPlaces(building.type);
+      const held = garrisonStrength(building.garrison);
+      if (wanted <= 0) return;
+
+      const x = this.screenX(building.point);
+      const y = this.screenY(building.point) - 26 * camera.zoom;
+      const left = x - ((wanted - 1) * gap) / 2;
+      const colour = PLAYER_COLOURS[(building.owner - 1) % PLAYER_COLOURS.length]!;
+
+      for (let i = 0; i < wanted; i += 1) {
+        ctx.beginPath();
+        ctx.arc(left + i * gap, y, radius, 0, Math.PI * 2);
+        // A filled pip is a man; an outline is a place still to be filled.
+        if (i < held) {
+          ctx.fillStyle = colour;
+          ctx.fill();
+        } else {
+          ctx.strokeStyle = 'rgba(20, 16, 12, 0.55)';
+          ctx.lineWidth = Math.max(0.6, camera.zoom * 0.5);
+          ctx.stroke();
+        }
+      }
+    });
   }
 
   private drawRoadPreview(points: readonly number[]): void {

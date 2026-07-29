@@ -5,6 +5,7 @@ import { Simulation } from '../sim/simulation';
 import { planRoad } from '../sim/transport/pathfinding';
 import { BuildSpace, canHostSize, evaluateBuildSpace } from '../sim/world/buildspace';
 import { MapObject } from '../sim/world/terrain';
+import { garrisonStrength, Rank, RANK_COUNT } from '../sim/data/ranks';
 import { decodeSave, encodeSave, loadSimulation } from './save';
 
 const PLAYER = 1;
@@ -69,6 +70,20 @@ describe('saving and loading', () => {
     expect(restored.tick).toBe(original.tick);
     expect(restored.seed).toBe(original.seed);
     expect(restored.players).toEqual(original.players);
+  });
+
+  it('carries over the army, rank by rank', async () => {
+    const original = playedGame();
+    const home = original.buildings.require(original.players[0]!.headquarters);
+    home.garrison[Rank.Private] = 3;
+    home.garrison[Rank.Sergeant] = 2;
+    home.garrison[Rank.General] = 1;
+
+    const restored = await loadSimulation(await encodeSave(original, 'an army'));
+    const there = restored.buildings.require(restored.players[0]!.headquarters);
+
+    expect(there.garrison).toEqual(home.garrison);
+    expect(garrisonStrength(there.garrison)).toBe(6);
   });
 
   it('carries over the map, the roads and the stores', async () => {
@@ -137,7 +152,16 @@ describe('saves from an older version', () => {
     parsed.version = 1;
     delete parsed.growingFields;
     const settlers = parsed.settlers as { items: Record<string, unknown>[] };
-    for (const settler of settlers.items) delete settler.surveyFrom;
+    for (const settler of settlers.items) {
+      delete settler.surveyFrom;
+      delete settler.rank;
+    }
+    const buildings = parsed.buildings as { items: Record<string, unknown>[] };
+    for (const building of buildings.items) {
+      delete building.garrison;
+      delete building.garrisonRequested;
+      delete building.exhaustedFor;
+    }
 
     const out = new Blob([JSON.stringify(parsed)])
       .stream()
@@ -160,7 +184,15 @@ describe('saves from an older version', () => {
     // And the fields it predates default to nothing rather than to undefined.
     for (const settler of restored.settlers.all()) {
       expect(settler.surveyFrom).toBe(0);
+      expect(settler.rank).toBe(0);
     }
+
+    // A save older than soldiers has no army — but a store still needs a
+    // garrison of the right shape, or the first man trained goes nowhere.
+    const home = restored.buildings.require(restored.players[0]!.headquarters);
+    expect(home.garrison).toHaveLength(RANK_COUNT);
+    expect(garrisonStrength(home.garrison)).toBe(0);
+    expect(home.garrisonRequested).toBe(0);
   });
 
   it('refuses a save from a newer version it cannot understand', async () => {

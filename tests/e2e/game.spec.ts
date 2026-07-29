@@ -32,7 +32,7 @@ async function canvasCentre(page: Page): Promise<{ x: number; y: number }> {
  * rather than hard-coding a pixel this sweeps a ring of candidates near the
  * headquarters — much as a player would try a few spots.
  */
-async function tapUntilAccepted(page: Page): Promise<boolean> {
+async function tapUntilAccepted(page: Page): Promise<{ dx: number; dy: number } | null> {
   const centre = await canvasCentre(page);
   const cancel = page.getByRole('button', { name: 'Cancel' });
 
@@ -57,10 +57,10 @@ async function tapUntilAccepted(page: Page): Promise<boolean> {
     // was wrong in both directions: it holds the last message until another
     // replaces it or it ages out, so a success after a refusal read as another
     // refusal, and a first tap with the ticker still empty read as a success.
-    if (!(await cancel.isVisible())) return true;
+    if (!(await cancel.isVisible())) return offset;
   }
 
-  return false;
+  return null;
 }
 
 test('the title screen offers a new game', async ({ page }) => {
@@ -115,7 +115,7 @@ test('a woodcutter can be placed and starts building', async ({ page }) => {
   await page.locator('.card', { hasText: "Woodcutter's hut" }).click();
 
   // Away from the headquarters, which occupies the centre.
-  expect(await tapUntilAccepted(page)).toBe(true);
+  expect(await tapUntilAccepted(page)).not.toBeNull();
 
   // The site is selected after placing. Until a road reaches it, it reports
   // that rather than a bare "under construction" — the road is the next thing
@@ -239,7 +239,7 @@ test('demolishing asks before it acts', async ({ page }) => {
   await startNewGame(page);
   await page.getByRole('button', { name: 'Build' }).click();
   await page.locator('.card', { hasText: "Woodcutter's hut" }).click();
-  expect(await tapUntilAccepted(page)).toBe(true);
+  expect(await tapUntilAccepted(page)).not.toBeNull();
 
   // The site is selected after placing, so its panel is already up.
   const demolish = page.getByRole('button', { name: 'Demolish', exact: true });
@@ -285,4 +285,74 @@ test('a bare flag comes up on one press', async ({ page }) => {
   await page.getByRole('button', { name: 'Remove flag', exact: true }).click();
   await expect(panel.locator('.panel__title')).not.toHaveText('Flag');
   await expect(placeFlag).toBeVisible();
+});
+
+test('a barracks says how many soldiers hold it', async ({ page }) => {
+  // Placing, connecting, building and then marching a man out to it: this one
+  // plays a slice of a real game rather than poking at a panel.
+  test.setTimeout(240_000);
+  await startNewGame(page);
+
+  const centre = await canvasCentre(page);
+  const panel = page.locator('.panel');
+
+  await page.getByRole('button', { name: 'Build' }).click();
+  await page.locator('.card', { hasText: 'Barracks' }).click();
+  const placed = await tapUntilAccepted(page);
+  expect(placed).not.toBeNull();
+
+  await expect(panel.locator('.panel__title')).toHaveText('Barracks');
+
+  // Connect it. The barracks flag sits a node off its door, so sweep the
+  // neighbourhood of the spot that took the building until a flag answers,
+  // then run the road back to the headquarters in one tap.
+  const near = [-26, -13, 0, 13, 26];
+  const road = page.getByRole('button', { name: 'Lay a road from here' });
+  let laid = false;
+
+  for (const dx of near) {
+    for (const dy of near) {
+      await page.mouse.click(centre.x + placed!.dx + dx, centre.y + placed!.dy + dy);
+      await page.waitForTimeout(90);
+      if (!(await road.isVisible())) continue;
+
+      await road.click();
+      // The headquarters flag is a node south-east of the middle of the map.
+      for (const home of [
+        { hx: 13, hy: 8 },
+        { hx: 26, hy: 16 },
+        { hx: 13, hy: 16 },
+        { hx: 0, hy: 0 },
+      ]) {
+        await page.mouse.click(centre.x + home.hx, centre.y + home.hy);
+        await page.waitForTimeout(120);
+        if (!(await road.isVisible())) break;
+      }
+      laid = true;
+      break;
+    }
+    if (laid) break;
+  }
+  expect(laid).toBe(true);
+
+  // Run it forward: building it, then walking a man out to it, takes a while.
+  // The button carries the speed it is running at, so each press is the next.
+  await page.getByRole('button', { name: '1\u00d7' }).click();
+  await page.getByRole('button', { name: '2\u00d7' }).click();
+  await expect(page.getByRole('button', { name: '4\u00d7' })).toBeVisible();
+
+  // Select the barracks again and watch it fill.
+  await page.mouse.click(centre.x + placed!.dx, centre.y + placed!.dy);
+  await expect(panel.locator('.panel__title')).toHaveText('Barracks');
+
+  // The ground is claimed by men, not by roofs: it stands empty first.
+  await expect(panel).toContainText('Garrison: 0 of 2', { timeout: 120_000 });
+  await expect(panel).toContainText('Waiting for soldiers');
+
+  // Then the men arrive, and the panel says who they are. Both places fill —
+  // asserting on one man in particular is a race, since two can arrive between
+  // one poll and the next.
+  await expect(panel).toContainText('Garrison: 2 of 2', { timeout: 120_000 });
+  await expect(panel).toContainText('Private: 2');
+  await expect(panel).toContainText('Working');
 });

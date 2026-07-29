@@ -5,6 +5,7 @@ import { Rng } from './core/rng';
 import type { BuildingInfo, BuildingType } from './data/buildings';
 import { BuildingType as Type, buildingInfo } from './data/buildings';
 import { Profession, professionInfo } from './data/professions';
+import { emptyGarrison, garrisonStrength, Rank, RANK_COUNT, TOP_RANK } from './data/ranks';
 import { Ware, WARE_COUNT } from './data/wares';
 import type { PoolSnapshot } from './core/pool';
 import { EntityTable } from './entities/registry';
@@ -167,6 +168,31 @@ const STARTING_STOCK: readonly { ware: Ware; count: number }[] = [
 const STARTING_SETTLERS = 32;
 
 /**
+ * What a soldier is made of. One of each, and a settler to carry them.
+ */
+const SOLDIER_COST: readonly Ware[] = [Ware.Sword, Ware.Shield, Ware.Beer];
+
+/**
+ * Settlers a store will not train away.
+ *
+ * Recruiting competes with every trade for the same people, and a player who
+ * builds an armoury should not find his sawmills going quiet. The reserve above
+ * this line is what the army may have.
+ */
+export const SETTLERS_KEPT_BACK = 8;
+
+/**
+ * Privates the headquarters starts with.
+ *
+ * Ground is only claimed by a building that is actually held, so without these
+ * a new player could not put up so much as a barracks until he had built the
+ * whole iron, armoury and brewery chain — which he cannot do without room to
+ * build it in. They are the military counterpart of the starting axes: enough
+ * to open the frontier once, and no more.
+ */
+export const STARTING_GARRISON = 6;
+
+/**
  * How often a new settler turns up at the headquarters — every thirty seconds.
  *
  * One every two minutes could not keep up with what the player was building:
@@ -275,7 +301,7 @@ type FieldWork = Extract<
  * added how long a building has been finding nothing. Older saves still load:
  * `fromSnapshot` fills in whatever they predate.
  */
-export const SAVE_VERSION = 4;
+export const SAVE_VERSION = 5;
 
 /** The parts of the map that play can change, and so must be saved. */
 export interface MapSnapshot {
@@ -381,7 +407,10 @@ export class Simulation {
       for (const entry of STARTING_STOCK) {
         headquarters.stock[entry.ware] = (headquarters.stock[entry.ware] ?? 0) + entry.count;
       }
-      headquarters.reserve = STARTING_SETTLERS;
+      // The six are *among* the thirty-two, not on top of them: a province
+      // supports the people it supports, and some of them are already soldiers.
+      headquarters.reserve = STARTING_SETTLERS - STARTING_GARRISON;
+      headquarters.garrison[Rank.Private] = STARTING_GARRISON;
 
       simulation.players[slot]!.headquarters = headquarters.id;
     });
@@ -769,6 +798,11 @@ export class Simulation {
       exhaustedFor: 0,
       stock: isStoreType(info) ? new Array<number>(WARE_COUNT).fill(0) : [],
       reserve: 0,
+      // Stores hold the men they have trained; military buildings hold the men
+      // who have marched out. Nothing else keeps soldiers, so nothing else pays
+      // for the array.
+      garrison: keepsSoldiers(info) ? emptyGarrison() : [],
+      garrisonRequested: 0,
     }));
 
     this.world.building[point] = building.id;
@@ -802,6 +836,7 @@ export class Simulation {
       taskPoint: 0,
       taskTimer: 0,
       surveyFrom: 0,
+      rank: 0,
     }));
   }
 
@@ -817,6 +852,7 @@ export class Simulation {
     }
 
     if (building.worker) this.dismissSettler(building.worker);
+    if (building.garrison.length > 0) this.disbandGarrison(building);
 
     // Wares already on the road to a building that no longer exists need a new
     // home, or they would circle forever.
@@ -1202,6 +1238,15 @@ export class Simulation {
 
   /** Takes a returning settler in, with the tool of its trade. */
   private arriveAtStore(settler: Settler, store: Building): void {
+    // A soldier keeps his sword, his shield and the rank he was promoted to:
+    // taking him back as a plain settler would quietly disarm him, and a
+    // frontier remodelled twice would cost the player his whole army.
+    if (settler.profession === Profession.Soldier && store.garrison.length > 0) {
+      store.garrison[settler.rank] = (store.garrison[settler.rank] ?? 0) + 1;
+      this.settlers.remove(settler.id);
+      return;
+    }
+
     store.reserve += 1;
     const tool = professionInfo(settler.profession).tool;
     if (tool !== null) store.stock[tool] = (store.stock[tool] ?? 0) + 1;
@@ -1476,6 +1521,11 @@ export class Simulation {
   private arriveAtJob(settler: Settler): void {
     if (settler.profession === Profession.Geologist) {
       this.beginSurvey(settler);
+      return;
+    }
+
+    if (settler.profession === Profession.Soldier) {
+      this.joinGarrison(settler);
       return;
     }
 
@@ -2350,7 +2400,27 @@ export class Simulation {
         let total = 0;
         for (const ware of behaviour.food) total += owed(ware);
         building.inputsIncoming[0] = total;
+        return;
       }
+
+      if (behaviour.kind === 'military') {
+        building.inputsIncoming[0] = owed(Ware.Coin);
+      }
+    });
+
+    // Soldiers on the march are the same sort of promise as a crate on a road,
+    // and go wrong the same way: a man who is dismissed or who arrives at a
+    // building that has been demolished leaves a request behind him that no
+    // fortress can ever fill. Count them back out of the world too.
+    const marching = new Map<number, number>();
+    this.settlers.forEach((settler) => {
+      if (settler.profession !== Profession.Soldier) return;
+      if (settler.state !== SettlerState.WalkingToJob) return;
+      marching.set(settler.building, (marching.get(settler.building) ?? 0) + 1);
+    });
+    this.buildings.forEach((building) => {
+      if (buildingInfo(building.type).behaviour.kind !== 'military') return;
+      building.garrisonRequested = marching.get(building.id) ?? 0;
     });
   }
 
@@ -2422,14 +2492,19 @@ export class Simulation {
     const behaviour = info.behaviour;
 
     if (behaviour.kind === 'headquarters' || behaviour.kind === 'store') {
+      this.trainSoldiers(building);
       this.pushStoredWares(building);
       return;
     }
 
-    // An outpost holds its ground on its own. It claimed the territory the
-    // moment it was finished and asks nothing of anybody after that, so it must
-    // not fall into the staffing branch below and sit reporting a worker it
-    // will never want.
+    if (behaviour.kind === 'military') {
+      this.manTheWalls(building, behaviour.garrison);
+      return;
+    }
+
+    // An outpost that wants nobody at all. It asks nothing of anybody once it
+    // is finished, so it must not fall into the staffing branch below and sit
+    // reporting a worker it will never want.
     if (info.worker === null) {
       building.status = BuildingStatus.Working;
       return;
@@ -2543,8 +2618,10 @@ export class Simulation {
 
     const info = buildingInfo(building.type);
     if (info.behaviour.kind === 'military') {
-      this.claimTerritory(building.point, info.behaviour.radius, building.owner);
-      this.note(`${info.name} completed, claiming new ground.`, MessageCategory.Territory, building.point);
+      // The ground goes over when the first soldier walks in, not when the
+      // roof goes on. An empty barracks holds nothing.
+      building.status = BuildingStatus.Unmanned;
+      this.note(`${info.name} completed, waiting for soldiers.`, MessageCategory.Built, building.point);
       return;
     }
 
@@ -2962,6 +3039,12 @@ export class Simulation {
       return;
     }
 
+    if (behaviour.kind === 'military') {
+      building.inputsIncoming[0] = Math.max(0, (building.inputsIncoming[0] ?? 0) - 1);
+      this.promoteWithCoin(building);
+      return;
+    }
+
     if (behaviour.kind === 'extract' && behaviour.food?.includes(ware)) {
       building.inputs[0] = (building.inputs[0] ?? 0) + 1;
       building.inputsIncoming[0] = Math.max(0, (building.inputsIncoming[0] ?? 0) - 1);
@@ -3075,6 +3158,173 @@ export class Simulation {
     });
 
     return best;
+  }
+
+  // -------------------------------------------------------------- soldiers
+
+  /**
+   * A store turns a sword, a shield, a beer and a spare settler into a private.
+   *
+   * The whole metal economy exists to reach this line: without it the armoury's
+   * output and the mint's had nowhere to go but a warehouse shelf.
+   *
+   * One man a tick at most, and never down to the last of the reserve — see
+   * `SETTLERS_KEPT_BACK`. He waits here in the store's own garrison until some
+   * building on the frontier sends for him.
+   */
+  private trainSoldiers(store: Building): void {
+    if (store.reserve <= SETTLERS_KEPT_BACK) return;
+    for (const ware of SOLDIER_COST) {
+      if ((store.stock[ware] ?? 0) <= 0) return;
+    }
+
+    for (const ware of SOLDIER_COST) store.stock[ware] = store.stock[ware]! - 1;
+    store.reserve -= 1;
+    store.garrison[Rank.Private] = (store.garrison[Rank.Private] ?? 0) + 1;
+  }
+
+  /**
+   * A military building keeps itself manned, and holds ground only while it is.
+   *
+   * An empty barracks claims nothing: the ground goes over when the first man
+   * reaches it, which is what makes the weapon chain the price of expanding
+   * rather than a luxury bought afterwards.
+   */
+  private manTheWalls(building: Building, wanted: number): void {
+    const held = garrisonStrength(building.garrison);
+    building.status = held > 0 ? BuildingStatus.Working : BuildingStatus.Unmanned;
+
+    if (held + building.garrisonRequested >= wanted) return;
+    this.requestSoldier(building);
+  }
+
+  /**
+   * Sends for one man from the nearest store that has one.
+   *
+   * The strongest goes: a player who has built the gold chain sees his best men
+   * on the frontier rather than sitting in a warehouse, and the promotions he
+   * paid for are visible where they matter.
+   */
+  private requestSoldier(building: Building): void {
+    const destinationFlag = this.world.flag[building.flagPoint];
+    if (!destinationFlag) return;
+
+    const store = this.garrisonSupplierFor(building.owner, destinationFlag);
+    if (!store) return;
+
+    const rank = strongestIn(store.garrison);
+    if (rank === undefined) return;
+
+    const storeFlag = this.world.flag[store.flagPoint]!;
+    const path = roadPointPath(this.network, this.roads, storeFlag, destinationFlag);
+    if (!path) return;
+
+    store.garrison[rank] = store.garrison[rank]! - 1;
+
+    const settler = this.createSettler(building.owner, Profession.Soldier, store.flagPoint);
+    settler.rank = rank;
+    settler.building = building.id;
+    settler.state = SettlerState.WalkingToJob;
+    this.setPath(settler, [...path, building.point]);
+    building.garrisonRequested += 1;
+  }
+
+  /** The nearest store along the roads that has a soldier to spare. */
+  private garrisonSupplierFor(owner: number, destinationFlag: number): Building | undefined {
+    let best: Building | undefined;
+    let bestCost = Number.POSITIVE_INFINITY;
+
+    this.buildings.forEach((building) => {
+      if (building.owner !== owner || !isStore(building)) return;
+      if (garrisonStrength(building.garrison) <= 0) return;
+
+      const flagId = this.world.flag[building.flagPoint];
+      if (!flagId) return;
+
+      const cost = flagId === destinationFlag ? 0 : this.network.cost(flagId, destinationFlag);
+      if (cost === undefined || cost >= bestCost) return;
+
+      bestCost = cost;
+      best = building;
+    });
+
+    return best;
+  }
+
+  /**
+   * A soldier reaches the building he was sent to and goes inside.
+   *
+   * He stops being an entity at the door — a garrison is counts by rank, the
+   * same as a store's reserve — and the ground goes over on the first man in.
+   */
+  private joinGarrison(settler: Settler): void {
+    const building = this.buildings.get(settler.building);
+    const info = building ? buildingInfo(building.type) : undefined;
+    const behaviour = info?.behaviour;
+
+    if (!building || !behaviour || behaviour.kind !== 'military') {
+      // Torn down while he was walking. He goes back to a store, weapons and
+      // rank intact — `arriveAtStore` knows a soldier from a settler.
+      this.sendHome(settler);
+      return;
+    }
+
+    building.garrisonRequested = Math.max(0, building.garrisonRequested - 1);
+
+    // Somebody else filled the last place. Rather than crowd in, he turns round.
+    const held = garrisonStrength(building.garrison);
+    if (held >= behaviour.garrison) {
+      this.sendHome(settler);
+      return;
+    }
+
+    building.garrison[settler.rank] = (building.garrison[settler.rank] ?? 0) + 1;
+    building.status = BuildingStatus.Working;
+    this.settlers.remove(settler.id);
+
+    if (held === 0) {
+      this.claimTerritory(building.point, behaviour.radius, building.owner);
+      this.note(
+        `${info.name} manned, claiming new ground.`,
+        MessageCategory.Territory,
+        building.point,
+      );
+    }
+  }
+
+  /**
+   * A gold coin buys one promotion, and buys it for the man who needs it most.
+   *
+   * Promoting the lowest rank first is what makes a steady trickle of gold lift
+   * a whole garrison instead of producing one general and eight privates.
+   */
+  private promoteWithCoin(building: Building): void {
+    for (let rank = 0; rank < TOP_RANK; rank += 1) {
+      if ((building.garrison[rank] ?? 0) <= 0) continue;
+      building.garrison[rank] = building.garrison[rank]! - 1;
+      building.garrison[rank + 1] = (building.garrison[rank + 1] ?? 0) + 1;
+      return;
+    }
+  }
+
+  /**
+   * Turns a garrison back into men and sends them home.
+   *
+   * Demolishing a building loses whatever wares are inside it, as in the
+   * original, but soldiers are people: they walk back to a store and can be
+   * sent out again.
+   */
+  private disbandGarrison(building: Building): void {
+    for (let rank = 0; rank < RANK_COUNT; rank += 1) {
+      const count = building.garrison[rank] ?? 0;
+      building.garrison[rank] = 0;
+
+      for (let i = 0; i < count; i += 1) {
+        const settler = this.createSettler(building.owner, Profession.Soldier, building.point);
+        settler.rank = rank;
+        this.sendHome(settler);
+      }
+    }
   }
 
   private requestWorker(building: Building, info: BuildingInfo): void {
@@ -3435,7 +3685,15 @@ export class Simulation {
     simulation.roads.adopt(snapshot.roads.pool, snapshot.roads.items);
     simulation.buildings.adopt(
       snapshot.buildings.pool,
-      snapshot.buildings.items.map((b) => ({ ...b, exhaustedFor: b.exhaustedFor ?? 0 })),
+      snapshot.buildings.items.map((b) => ({
+        ...b,
+        exhaustedFor: b.exhaustedFor ?? 0,
+        // Saves written before soldiers existed have no army, which is exactly
+        // what an empty garrison says. The array still has to be the right
+        // shape for the buildings that will now keep one.
+        garrison: b.garrison ?? (keepsSoldiers(buildingInfo(b.type)) ? emptyGarrison() : []),
+        garrisonRequested: b.garrisonRequested ?? 0,
+      })),
     );
     // Footprints are derived, so no save carries them: rebuild them from the
     // buildings themselves, and every save ever written gains the spacing rules.
@@ -3446,7 +3704,11 @@ export class Simulation {
     // geologist, so nought is not merely a safe default but the right one.
     simulation.settlers.adopt(
       snapshot.settlers.pool,
-      snapshot.settlers.items.map((settler) => ({ ...settler, surveyFrom: settler.surveyFrom ?? 0 })),
+      snapshot.settlers.items.map((settler) => ({
+        ...settler,
+        surveyFrom: settler.surveyFrom ?? 0,
+        rank: settler.rank ?? 0,
+      })),
     );
 
     return simulation;
@@ -3495,7 +3757,9 @@ export class Simulation {
   population(owner: number): number {
     let total = 0;
     this.buildings.forEach((building) => {
-      if (building.owner === owner && isStore(building)) total += building.reserve;
+      if (building.owner !== owner) return;
+      if (isStore(building)) total += building.reserve;
+      total += garrisonStrength(building.garrison);
     });
     this.settlers.forEach((settler) => {
       if (settler.owner === owner) total += 1;
@@ -3541,6 +3805,7 @@ export class Simulation {
         .int32(building.workTimer)
         .int32(building.output ?? -1)
         .int32(building.reserve)
+        .array(building.garrison)
         .array(building.delivered)
         .array(building.incoming)
         .array(building.inputs)
@@ -3579,10 +3844,29 @@ function isStoreType(info: BuildingInfo): boolean {
   return info.behaviour.kind === 'headquarters' || info.behaviour.kind === 'store';
 }
 
+/**
+ * Whether a building keeps soldiers: a store trains and holds them until they
+ * are called for, a military building is what they are called to.
+ */
+function keepsSoldiers(info: BuildingInfo): boolean {
+  return isStoreType(info) || info.behaviour.kind === 'military';
+}
+
+/** The highest rank present in a garrison, or undefined when it is empty. */
+function strongestIn(garrison: readonly number[]): number | undefined {
+  for (let rank = garrison.length - 1; rank >= 0; rank -= 1) {
+    if ((garrison[rank] ?? 0) > 0) return rank;
+  }
+  return undefined;
+}
+
 /** How many input slots a building's behaviour needs. */
 function inputSlotCount(info: BuildingInfo): number {
   const behaviour = info.behaviour;
   if (behaviour.kind === 'craft') return behaviour.inputs.length;
+  // One slot for the gold on its way, which is all a military building is ever
+  // sent. Nothing is stocked: a coin promotes a man the moment it arrives.
+  if (behaviour.kind === 'military') return 1;
   if (behaviour.kind === 'extract' && behaviour.food && behaviour.food.length > 0) return 1;
   return 0;
 }

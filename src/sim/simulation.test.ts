@@ -6,7 +6,9 @@ import { Profession } from './data/professions';
 import { Ware } from './data/wares';
 import type { Flag, Settler } from './entities/types';
 import { BuildingState, BuildingStatus, FLAG_CAPACITY, SettlerState } from './entities/types';
-import { Simulation } from './simulation';
+import { garrisonStrength, Rank } from './data/ranks';
+import { Simulation, SETTLERS_KEPT_BACK, STARTING_GARRISON } from './simulation';
+import { INPUT_STOCK_LIMIT, outstandingDemand, willAccept } from './transport/dispatch';
 import { planRoad } from './transport/pathfinding';
 import {
   BuildingSize,
@@ -446,7 +448,7 @@ describe('determinism', () => {
     // deliberately, never reflexively.
     const sim = newGame(4242);
     run(sim, 1000);
-    expect(sim.hash()).toMatchInlineSnapshot(`"d67087aa"`);
+    expect(sim.hash()).toMatchInlineSnapshot(`"d6cf0be3"`);
   });
 });
 
@@ -3654,5 +3656,267 @@ describe('crates and a jammed flag', () => {
     far.wares.length = 0;
     run(sim, 300);
     expect(sim.storedWare(PLAYER, Ware.Board)).toBeGreaterThan(before);
+  });
+});
+
+describe('raising an army', () => {
+  /** Every soldier a player has, wherever he happens to be. */
+  function soldiers(sim: Simulation): number {
+    let total = 0;
+    sim.buildings.forEach((building) => {
+      if (building.owner === PLAYER) total += garrisonStrength(building.garrison);
+    });
+    sim.settlers.forEach((settler) => {
+      if (settler.owner === PLAYER && settler.profession === Profession.Soldier) total += 1;
+    });
+    return total;
+  }
+
+  /** Runs until a building is finished, and says whether it got there. */
+  function finish(sim: Simulation, id: number, ticks = 3000): boolean {
+    for (let i = 0; i < ticks; i += 1) {
+      sim.update();
+      if (sim.buildings.get(id)?.state === BuildingState.Complete) return true;
+    }
+    return false;
+  }
+
+  /** How many lattice points the player holds. */
+  function territory(sim: Simulation): number {
+    let total = 0;
+    for (let point = 0; point < sim.world.owner.length; point += 1) {
+      if (sim.world.owner[point] === PLAYER) total += 1;
+    }
+    return total;
+  }
+
+  /** Arms a store with the makings of `count` soldiers. */
+  function supply(store: { stock: number[] }, count: number): void {
+    store.stock[Ware.Sword] = count;
+    store.stock[Ware.Shield] = count;
+    store.stock[Ware.Beer] = count;
+  }
+
+  it('turns a sword, a shield and a beer into a private', () => {
+    const sim = newGame();
+    const hq = headquarters(sim);
+    hq.reserve = SETTLERS_KEPT_BACK + 4;
+    supply(hq, 1);
+
+    const before = garrisonStrength(hq.garrison);
+    run(sim, 2);
+
+    expect(garrisonStrength(hq.garrison)).toBe(before + 1);
+    expect(hq.garrison[Rank.Private]).toBe(STARTING_GARRISON + 1);
+    expect(hq.reserve).toBe(SETTLERS_KEPT_BACK + 3);
+    // Exactly one of each, and no more: an armoury's output must not vanish.
+    expect(hq.stock[Ware.Sword]).toBe(0);
+    expect(hq.stock[Ware.Shield]).toBe(0);
+    expect(hq.stock[Ware.Beer]).toBe(0);
+  });
+
+  it('trains nobody when any one of the three is missing', () => {
+    for (const missing of [Ware.Sword, Ware.Shield, Ware.Beer]) {
+      const sim = newGame();
+      const hq = headquarters(sim);
+      hq.reserve = SETTLERS_KEPT_BACK + 4;
+      supply(hq, 3);
+      hq.stock[missing] = 0;
+
+      const before = garrisonStrength(hq.garrison);
+      run(sim, 60);
+      expect(garrisonStrength(hq.garrison)).toBe(before);
+    }
+  });
+
+  it('will not train the workforce away', () => {
+    const sim = newGame();
+    const hq = headquarters(sim);
+    hq.reserve = SETTLERS_KEPT_BACK;
+    supply(hq, 5);
+
+    const before = garrisonStrength(hq.garrison);
+    // Short of the interval at which the province takes in anybody new, so the
+    // reserve is exactly what this test put there.
+    run(sim, 100);
+
+    expect(garrisonStrength(hq.garrison)).toBe(before);
+    expect(hq.reserve).toBe(SETTLERS_KEPT_BACK);
+    expect(hq.stock[Ware.Sword]).toBe(5);
+  });
+
+  it('claims no ground until a soldier is actually standing in it', () => {
+    const sim = newGame();
+    const hq = headquarters(sim);
+
+    // Nobody to send, so the barracks can be finished and left empty.
+    hq.garrison.fill(0);
+
+    const id = buildAndConnect(sim, BuildingType.Barracks)!;
+    expect(id).toBeDefined();
+    const barracks = sim.buildings.require(id);
+
+    let built = false;
+    for (let i = 0; i < 3000 && !built; i += 1) {
+      sim.update();
+      built = barracks.state === BuildingState.Complete;
+    }
+    expect(built).toBe(true);
+
+    const held = territory(sim);
+    run(sim, 400);
+
+    // A hut with a flag on it, and no ground of its own.
+    expect(garrisonStrength(barracks.garrison)).toBe(0);
+    expect(barracks.status).toBe(BuildingStatus.Unmanned);
+    expect(territory(sim)).toBe(held);
+
+    // Now give him somebody, and the frontier moves.
+    hq.garrison[Rank.Private] = 2;
+    let manned = false;
+    for (let i = 0; i < 600 && !manned; i += 1) {
+      sim.update();
+      manned = garrisonStrength(barracks.garrison) > 0;
+    }
+
+    expect(manned).toBe(true);
+    expect(territory(sim)).toBeGreaterThan(held);
+    expect(barracks.status).toBe(BuildingStatus.Working);
+  });
+
+  it('marches men out without making or losing any', () => {
+    const sim = newGame();
+    const before = soldiers(sim);
+    expect(before).toBe(STARTING_GARRISON);
+
+    const id = buildAndConnect(sim, BuildingType.Barracks)!;
+    expect(id).toBeDefined();
+    const barracks = sim.buildings.require(id);
+
+    let counted = before;
+    for (let i = 0; i < 3000; i += 1) {
+      sim.update();
+      counted = Math.min(counted, soldiers(sim));
+      // No man is ever in two places, and none is quietly conjured up.
+      expect(soldiers(sim)).toBe(before);
+    }
+
+    const wanted = buildingInfo(BuildingType.Barracks).behaviour;
+    expect(wanted.kind).toBe('military');
+    expect(garrisonStrength(barracks.garrison)).toBe(
+      wanted.kind === 'military' ? wanted.garrison : 0,
+    );
+    // And having filled it, it stops asking.
+    expect(barracks.garrisonRequested).toBe(0);
+  });
+
+  it('sends a demolished garrison home rather than burying it', () => {
+    const sim = newGame();
+    const id = buildAndConnect(sim, BuildingType.Barracks)!;
+    const barracks = sim.buildings.require(id);
+
+    let manned = false;
+    for (let i = 0; i < 3000 && !manned; i += 1) {
+      sim.update();
+      manned = garrisonStrength(barracks.garrison) > 0;
+    }
+    expect(manned).toBe(true);
+
+    const before = soldiers(sim);
+    expect(sim.demolishBuilding(PLAYER, barracks.point).ok).toBe(true);
+    expect(soldiers(sim)).toBe(before);
+
+    run(sim, 600);
+    expect(soldiers(sim)).toBe(before);
+    expect(garrisonStrength(headquarters(sim).garrison)).toBeGreaterThan(0);
+  });
+
+  it('spends a coin on the man who needs it most', () => {
+    const sim = newGame();
+    const id = buildAndConnect(sim, BuildingType.Barracks)!;
+    const barracks = sim.buildings.require(id);
+
+    let manned = false;
+    for (let i = 0; i < 3000 && !manned; i += 1) {
+      sim.update();
+      manned = garrisonStrength(barracks.garrison) > 0;
+    }
+    expect(manned).toBe(true);
+
+    // A sergeant and a private: the coin belongs to the private.
+    barracks.garrison.fill(0);
+    barracks.garrison[Rank.Private] = 1;
+    barracks.garrison[Rank.Sergeant] = 1;
+
+    const flag = sim.flags.require(sim.world.flag[barracks.flagPoint]!);
+    flag.wares.push({ ware: Ware.Coin, destination: barracks.id });
+    run(sim, 2);
+
+    expect(barracks.garrison[Rank.Private]).toBe(0);
+    expect(barracks.garrison[Rank.PrivateFirstClass]).toBe(1);
+    expect(barracks.garrison[Rank.Sergeant]).toBe(1);
+    expect(flag.wares.some((parcel) => parcel.ware === Ware.Coin)).toBe(false);
+  });
+
+  it('stops asking for gold once there is nobody left to promote', () => {
+    const sim = newGame();
+    const id = buildAndConnect(sim, BuildingType.Barracks)!;
+    expect(finish(sim, id)).toBe(true);
+    const barracks = sim.buildings.require(id);
+
+    barracks.garrison.fill(0);
+    barracks.garrison[Rank.Officer] = 2;
+    expect(outstandingDemand(barracks, Ware.Coin)).toBeGreaterThan(0);
+    expect(willAccept(barracks, Ware.Coin)).toBe(true);
+
+    barracks.garrison.fill(0);
+    barracks.garrison[Rank.General] = 2;
+    expect(outstandingDemand(barracks, Ware.Coin)).toBe(0);
+    expect(willAccept(barracks, Ware.Coin)).toBe(false);
+
+    // And gold is the only thing it ever wants.
+    barracks.garrison[Rank.General] = 0;
+    barracks.garrison[Rank.Private] = 2;
+    expect(outstandingDemand(barracks, Ware.Board)).toBe(0);
+    expect(willAccept(barracks, Ware.Bread)).toBe(false);
+  });
+
+  it('forges whichever of a sword and a shield is scarcer', () => {
+    const sim = newGame();
+    const id = buildAndConnect(sim, BuildingType.Armoury)!;
+    expect(id).toBeDefined();
+    expect(finish(sim, id)).toBe(true);
+
+    const armoury = sim.buildings.require(id);
+    const hq = headquarters(sim);
+
+    // It needs a smith at the forge before it makes anything at all.
+    let staffed = false;
+    for (let i = 0; i < 2000 && !staffed; i += 1) {
+      sim.update();
+      staffed = armoury.worker !== 0;
+    }
+    expect(staffed).toBe(true);
+
+    const forge = (swords: number, shields: number): Ware | null => {
+      hq.stock[Ware.Sword] = swords;
+      hq.stock[Ware.Shield] = shields;
+
+      armoury.output = null;
+      armoury.workTimer = 0;
+      armoury.inputs.fill(INPUT_STOCK_LIMIT);
+
+      for (let i = 0; i < 600 && armoury.output === null; i += 1) {
+        sim.update();
+        // Keep the inputs topped up: what is being tested is the choice, not
+        // whether an iron chain happens to exist on this seed.
+        if (armoury.output === null) armoury.inputs.fill(INPUT_STOCK_LIMIT);
+      }
+      return armoury.output;
+    };
+
+    // An armoury that only ever forged swords left half a barracks unarmed.
+    expect(forge(5, 0)).toBe(Ware.Shield);
+    expect(forge(0, 5)).toBe(Ware.Sword);
   });
 });

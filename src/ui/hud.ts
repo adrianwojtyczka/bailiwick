@@ -7,6 +7,7 @@ import { BuildingState, BuildingStatus } from '../sim/entities/types';
 import type { Simulation } from '../sim/simulation';
 import { TICKS_PER_SECOND } from '../sim/simulation';
 import { OUT_OF_BOUNDS } from '../sim/core/grid';
+import { garrisonStrength, rankName, TOP_RANK } from '../sim/data/ranks';
 import { BuildSpace, evaluateBuildSpace } from '../sim/world/buildspace';
 import {
   FIELD_FULLY_GROWN,
@@ -26,6 +27,7 @@ const STATUS_TEXT: Readonly<Record<BuildingStatus, string>> = {
   [BuildingStatus.Blocked]: 'The flag outside is full',
   [BuildingStatus.UnderConstruction]: 'Under construction',
   [BuildingStatus.Unreachable]: 'No road connects this to your network',
+  [BuildingStatus.Unmanned]: 'Waiting for soldiers',
 };
 
 /**
@@ -63,6 +65,7 @@ export function panelSignature(simulation: Simulation, point: number): string {
       building.status,
       building.buildProgress,
       building.reserve,
+      ...building.garrison,
       ...building.delivered,
       ...building.inputs,
       ...building.stock,
@@ -76,6 +79,19 @@ export function panelSignature(simulation: Simulation, point: number): string {
   }
 
   return parts.join(',');
+}
+
+/**
+ * A garrison written out rank by rank, strongest first, leaving out the ranks
+ * nobody holds. Five lines of zeroes tell the player nothing.
+ */
+function rankList(garrison: readonly number[]): HTMLElement[] {
+  const lines: HTMLElement[] = [];
+  for (let rank = garrison.length - 1; rank >= 0; rank -= 1) {
+    const count = garrison[rank] ?? 0;
+    if (count > 0) lines.push(el('li', {}, `${rankName(rank)}: ${count}`));
+  }
+  return lines;
 }
 
 export interface HudCallbacks {
@@ -465,6 +481,34 @@ export class Hud {
         .map((entry) => el('li', {}, `${wareInfo(entry.ware).name}: ${entry.count}`));
       children.push(el('ul', { class: 'panel__list' }, ...held));
       children.push(el('p', { class: 'panel__note' }, `Settlers waiting: ${building.reserve}`));
+
+      const trained = garrisonStrength(building.garrison);
+      if (trained > 0) {
+        children.push(el('p', { class: 'panel__note' }, `Soldiers waiting: ${trained}`));
+        children.push(el('ul', { class: 'panel__list' }, ...rankList(building.garrison)));
+      }
+    } else if (info.behaviour.kind === 'military') {
+      const held = garrisonStrength(building.garrison);
+      children.push(
+        el('p', { class: 'panel__note' }, `Garrison: ${held} of ${info.behaviour.garrison}`),
+      );
+      children.push(el('ul', { class: 'panel__list' }, ...rankList(building.garrison)));
+
+      // What the gold chain is for, said where the player can act on it.
+      if (held > 0) {
+        const promotable = building.garrison
+          .slice(0, TOP_RANK)
+          .reduce((total, count) => total + count, 0);
+        children.push(
+          el(
+            'p',
+            { class: 'panel__note' },
+            promotable > 0
+              ? `A gold coin promotes one of the ${promotable} who can still rise.`
+              : 'Every man here is a general.',
+          ),
+        );
+      }
     }
 
     if (info.behaviour.kind !== 'headquarters') {
