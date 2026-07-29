@@ -10,9 +10,10 @@ import { fileURLToPath } from 'node:url';
 
 const repoRoot = new URL('../', import.meta.url);
 
-// Everything `vite build` emits into the repository root. `index.html` is left
-// alone: the build overwrites it, and deleting it first would leave the repo
-// without a landing page if the build then failed.
+// Everything `vite build` emits into the repository root except the pages
+// themselves. `index.html` and `game/index.html` are left alone: the build
+// overwrites both, and deleting them first would leave the repository with no
+// pages at all if the build then failed.
 const BUILD_OUTPUTS = ['assets', 'sw.js', 'manifest.webmanifest'];
 
 for (const entry of BUILD_OUTPUTS) {

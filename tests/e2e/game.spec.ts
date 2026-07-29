@@ -9,13 +9,27 @@ import { expect, test, type Page } from '@playwright/test';
 /** A fixed seed keeps the island identical between runs. */
 const TEST_SEED = 4242;
 
+/**
+ * Opens the title and starts a game on it.
+ *
+ * The game is its own page now, so this crosses a real navigation: the seed
+ * named on the title is carried over in the query string, and the map only
+ * appears once `game/` has loaded.
+ */
 async function startNewGame(page: Page, seed = TEST_SEED): Promise<void> {
   await page.goto(`/?seed=${seed}`);
   await expect(page.locator('.title__name')).toHaveText('Bailiwick');
 
   await page.getByRole('button', { name: 'New game' }).click();
+  await page.waitForURL(/game\/\?seed=/);
   await expect(page.locator('canvas.map')).toBeVisible();
   await expect(page.locator('.hud__bar')).toBeVisible();
+}
+
+/** Waits for the title page, which quitting now navigates to. */
+async function expectTitle(page: Page): Promise<void> {
+  await page.waitForURL((url) => !url.pathname.includes('/game'));
+  await expect(page.locator('.title__name')).toBeVisible();
 }
 
 /** The centre of the canvas, where the headquarters starts out. */
@@ -163,7 +177,7 @@ test('a game can be saved and then continued from the title screen', async ({ pa
   await page.getByRole('button', { name: 'Quit to title' }).click();
   // Quitting asks now; the save has just been taken, so decline.
   await page.getByRole('button', { name: 'Quit without saving' }).click();
-  await expect(page.locator('.title__name')).toBeVisible();
+  await expectTitle(page);
 
   await page.getByRole('button', { name: 'Load a save' }).click();
   await page.locator('.title__button--save').first().click();
@@ -192,7 +206,7 @@ test('the map pans when dragged', async ({ page }) => {
   expect(Buffer.compare(before, after)).not.toBe(0);
 });
 
-test('the page works offline once the service worker has cached it', async ({ page, context }) => {
+test('both pages work offline once the service worker has cached them', async ({ page, context }) => {
   await page.goto('/');
   await expect(page.locator('.title__name')).toBeVisible();
 
@@ -202,6 +216,20 @@ test('the page works offline once the service worker has cached it', async ({ pa
   await page.reload();
 
   await expect(page.locator('.title__name')).toHaveText('Bailiwick');
+
+  // And the game, which is a page of its own now. The worker used to answer
+  // every navigation with the title, so with no connection this would have
+  // opened the title screen again instead of an island.
+  await page.goto(`/game/?seed=${TEST_SEED}`);
+  await expect(page.locator('canvas.map')).toBeVisible();
+  await expect(page.locator('.hud__bar')).toBeVisible();
+
+  // Back to the title the way the game leaves, still with nothing to fetch.
+  await page.getByRole('button', { name: 'Menu' }).click();
+  await page.getByRole('button', { name: 'Quit to title' }).click();
+  await page.getByRole('button', { name: 'Quit without saving' }).click();
+  await expectTitle(page);
+
   await context.setOffline(false);
 });
 
@@ -378,7 +406,7 @@ test('continuing resumes the game you saved, not an older one', async ({ page })
   await page.getByRole('button', { name: 'Menu' }).click();
   await page.getByRole('button', { name: 'Quit to title' }).click();
   await page.getByRole('button', { name: 'Quit without saving' }).click();
-  await expect(page.locator('.title__name')).toBeVisible();
+  await expectTitle(page);
 
   // Continue read the autosave slot alone, so it came back to a game from
   // before the hut went down — or, this early, to no game at all.
@@ -413,7 +441,7 @@ test('quitting asks before it throws anything away', async ({ page }) => {
   // Save and quit leaves by way of a save, so the list has one to load.
   await page.getByRole('button', { name: 'Quit to title' }).click();
   await page.getByRole('button', { name: 'Save and quit' }).click();
-  await expect(page.locator('.title__name')).toBeVisible();
+  await expectTitle(page);
 
   await page.getByRole('button', { name: 'Load a save' }).click();
   await expect(page.locator('.title__button--save').first()).toBeVisible();

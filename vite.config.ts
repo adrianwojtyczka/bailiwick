@@ -19,6 +19,15 @@ export default defineConfig({
     target: 'es2022',
     cssMinify: true,
     reportCompressedSize: false,
+    // Two pages, not one: the title is a plain document at the root and the
+    // game is its own at `game/`, so opening the title costs nothing but the
+    // drawing and neither page has to carry the other's code.
+    rollupOptions: {
+      input: {
+        title: fileURLToPath(new URL('src/index.html', import.meta.url)),
+        game: fileURLToPath(new URL('src/game/index.html', import.meta.url)),
+      },
+    },
   },
   server: {
     host: true,

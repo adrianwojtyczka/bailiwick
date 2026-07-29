@@ -1,16 +1,23 @@
-import { loadSimulation } from '../../platform/save';
+import { readSaveMeta } from '../../platform/savefile';
 import type { SaveSlotSummary } from '../../platform/storage';
-import { getSave, listSaves, deleteSave } from '../../platform/storage';
-import type { Simulation } from '../../sim/simulation';
+import { getSave, listSaves, deleteSave, putSave } from '../../platform/storage';
 import { button, clear, el } from '../dom';
 import crestSvg from './crest.svg?raw';
 import sceneSvg from './scene.svg?raw';
 
+/**
+ * What the title screen can ask for.
+ *
+ * It names a choice and nothing more: the game is a separate page, so acting on
+ * either of these means visiting a URL rather than building a simulation here.
+ * Which save is worth resuming is a question about the save list, and so stays
+ * on this side; where a save is *played* is not.
+ */
 export interface TitleCallbacks {
   /** Start a brand new province. */
   newGame(): void;
-  /** Resume a game restored from a save. */
-  resume(simulation: Simulation): void;
+  /** Open the game on a save already in storage. */
+  playSave(id: string): void;
 }
 
 function svg(markup: string, className: string): HTMLElement {
@@ -146,21 +153,34 @@ export class TitleScreen {
   private async continueGame(): Promise<void> {
     try {
       const newest = await this.newestSave();
-      const save = newest && (await getSave(newest.id));
-      if (!save) {
+      if (!newest) {
         this.say('There is no game to continue.');
         return;
       }
-      this.callbacks.resume(await loadSimulation(save.bytes));
+      this.callbacks.playSave(newest.id);
     } catch (error) {
       this.say(`Could not continue: ${describe(error)}`);
     }
   }
 
+  /**
+   * Takes a save file in and opens the game on it.
+   *
+   * The bytes are put into a slot first. A page load cannot carry a file across
+   * with it, so storage is how it travels — and keeping the import means a file
+   * fetched from another device shows up in the load list afterwards rather
+   * than being playable exactly once. Only the file's *header* is read here —
+   * enough to refuse a file that is not a save, on the screen that offered to
+   * read it, without this page having to carry the whole simulation.
+   */
   private async loadFromFile(file: File): Promise<void> {
     try {
       const bytes = new Uint8Array(await file.arrayBuffer());
-      this.callbacks.resume(await loadSimulation(bytes));
+      const meta = await readSaveMeta(bytes);
+
+      const id = `slot-${Date.now()}`;
+      await putSave(id, { ...meta, name: meta.name || file.name, savedAt: Date.now() }, bytes);
+      this.callbacks.playSave(id);
     } catch (error) {
       this.say(`Could not read that file: ${describe(error)}`);
     }
@@ -206,12 +226,13 @@ export class TitleScreen {
 
   private async loadSlot(id: string): Promise<void> {
     try {
-      const save = await getSave(id);
-      if (!save) {
+      // Checked here rather than on the other side, so a slot deleted on
+      // another tab says so on the screen that listed it.
+      if (!(await getSave(id))) {
         this.say('That save has gone.');
         return;
       }
-      this.callbacks.resume(await loadSimulation(save.bytes));
+      this.callbacks.playSave(id);
     } catch (error) {
       this.say(`Could not load that save: ${describe(error)}`);
     }

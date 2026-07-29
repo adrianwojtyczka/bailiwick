@@ -1,28 +1,18 @@
 import './styles/main.scss';
-import { GameSession, setCurrentSession } from './game/session';
-import type { Simulation } from './sim/simulation';
-import { Simulation as Game } from './sim/simulation';
-import { clear, el } from './ui/dom';
 import { TitleScreen } from './ui/screens/title';
 
-/** A map this size generates in a fraction of a second and gives room to grow. */
-const MAP_SIZE = 96;
-const HUMAN_PLAYER = 1;
-
 /**
- * A seed given as `?seed=12345`.
+ * The title screen, and nothing else.
  *
- * World generation is a pure function of its seed, so naming one reproduces
- * exactly the same island — useful for comparing notes on a map, for reporting
- * a problem, and for tests that need the same ground every run.
+ * The game is its own document at `game/`, so this page carries none of the
+ * simulation with it: it opens on a drawing and four buttons, and everything
+ * it can do amounts to choosing which URL to visit next. Whatever the player
+ * picks is named in the query string, since a page load leaves nothing else
+ * standing.
  */
-function requestedSeed(): number | null {
-  const raw = new URLSearchParams(window.location.search).get('seed');
-  if (raw === null) return null;
 
-  const seed = Number.parseInt(raw, 10);
-  return Number.isFinite(seed) ? seed >>> 0 : null;
-}
+/** Where the game lives, relative to this page. */
+const GAME = 'game/';
 
 function requireApp(): HTMLDivElement {
   const element = document.querySelector<HTMLDivElement>('#app');
@@ -30,62 +20,23 @@ function requireApp(): HTMLDivElement {
   return element;
 }
 
-const app = requireApp();
-
-let title: TitleScreen | null = null;
-let session: GameSession | null = null;
-
-function showTitle(): void {
-  session?.destroy();
-  session = null;
-  setCurrentSession(null);
-
-  clear(app);
-  title = new TitleScreen(app, {
-    newGame: () => void startNewGame(),
-    resume: (simulation) => startSession(simulation),
-  });
+/**
+ * A `?seed=` named on the title screen is carried across to the game, so the
+ * seed in the address bar means the same thing on either page.
+ */
+function seedQuery(): string {
+  const seed = new URLSearchParams(window.location.search).get('seed');
+  return seed === null ? '' : `?seed=${encodeURIComponent(seed)}`;
 }
 
-function showBusy(message: string): void {
-  clear(app);
-  app.append(el('div', { class: 'loading' }, el('p', {}, message)));
-}
-
-async function startNewGame(): Promise<void> {
-  showBusy('Raising an island…');
-
-  // Yield a frame so the message actually paints before generation blocks.
-  await new Promise((resolve) => requestAnimationFrame(resolve));
-
-  const seed = requestedSeed() ?? Math.floor(Math.random() * 0xffff_ffff);
-
-  try {
-    const simulation = Game.create({
-      width: MAP_SIZE,
-      height: MAP_SIZE,
-      seed,
-      players: [{ name: 'You', colour: '#c4832b' }],
-    });
-    startSession(simulation);
-  } catch (error) {
-    // Some seeds produce an island with nowhere sensible to start; try again.
-    console.warn('world generation failed, retrying with a new seed', error);
-    void startNewGame();
-  }
-}
-
-function startSession(simulation: Simulation): void {
-  title?.destroy();
-  title = null;
-
-  clear(app);
-  session = new GameSession(app, simulation, HUMAN_PLAYER, showTitle);
-  setCurrentSession(session);
-  session.start();
-}
-
-showTitle();
+new TitleScreen(requireApp(), {
+  newGame: () => {
+    window.location.href = `${GAME}${seedQuery()}`;
+  },
+  playSave: (id) => {
+    window.location.href = `${GAME}?save=${encodeURIComponent(id)}`;
+  },
+});
 
 // The service worker is what makes the game work with no connection at all.
 // It is only generated for production builds.

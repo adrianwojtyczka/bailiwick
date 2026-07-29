@@ -1,5 +1,10 @@
 import type { SimulationSnapshot } from '../sim/simulation';
-import { SAVE_VERSION, Simulation } from '../sim/simulation';
+import { Simulation } from '../sim/simulation';
+import type { SaveMeta } from './savefile';
+import { checkVersion, fromBase64, gunzip, gzip, SAVE_EXTENSION, toBase64 } from './savefile';
+
+export { SAVE_EXTENSION } from './savefile';
+export type { SaveMeta } from './savefile';
 
 /**
  * Turning a game into bytes and back.
@@ -12,8 +17,6 @@ import { SAVE_VERSION, Simulation } from '../sim/simulation';
  * Everything here stays on the device. Exporting writes a file; it does not
  * upload anything.
  */
-
-export const SAVE_EXTENSION = '.bwsave';
 
 /** JSON-friendly stand-in for the map's typed arrays. */
 interface EncodedMap {
@@ -34,31 +37,7 @@ interface EncodedSave extends Omit<SimulationSnapshot, 'map'> {
   readonly meta: SaveMeta;
 }
 
-export interface SaveMeta {
-  readonly name: string;
-  /** Milliseconds since the epoch, taken outside the simulation. */
-  readonly savedAt: number;
-  readonly tick: number;
-}
-
 // -------------------------------------------------------------- base64
-
-function toBase64(bytes: Uint8Array): string {
-  // Chunked so a large map cannot blow the argument limit of String.fromCharCode.
-  const CHUNK = 0x8000;
-  let binary = '';
-  for (let offset = 0; offset < bytes.length; offset += CHUNK) {
-    binary += String.fromCharCode(...bytes.subarray(offset, offset + CHUNK));
-  }
-  return btoa(binary);
-}
-
-function fromBase64(encoded: string): Uint8Array {
-  const binary = atob(encoded);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
-  return bytes;
-}
 
 function encodeUint8(array: Uint8Array): string {
   return toBase64(array);
@@ -76,29 +55,6 @@ function decodeInt32(encoded: string): Int32Array {
   const bytes = fromBase64(encoded);
   // The buffer from base64 is freshly allocated, so it is already aligned.
   return new Int32Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / 4);
-}
-
-// ---------------------------------------------------------- compression
-
-async function gzip(text: string): Promise<Uint8Array> {
-  const bytes = new TextEncoder().encode(text);
-  if (typeof CompressionStream === 'undefined') return bytes;
-
-  const stream = new Blob([bytes as BlobPart]).stream().pipeThrough(new CompressionStream('gzip'));
-  return new Uint8Array(await new Response(stream).arrayBuffer());
-}
-
-async function gunzip(bytes: Uint8Array): Promise<string> {
-  // Uncompressed saves start with '{'; gzip always starts with 0x1f 0x8b.
-  if (bytes[0] !== 0x1f || bytes[1] !== 0x8b) return new TextDecoder().decode(bytes);
-  if (typeof DecompressionStream === 'undefined') {
-    throw new Error('this browser cannot read compressed saves');
-  }
-
-  const stream = new Blob([bytes as BlobPart])
-    .stream()
-    .pipeThrough(new DecompressionStream('gzip'));
-  return new Response(stream).text();
 }
 
 // ---------------------------------------------------------------- api
@@ -130,14 +86,7 @@ export async function decodeSave(
 ): Promise<{ snapshot: SimulationSnapshot; meta: SaveMeta }> {
   const parsed = JSON.parse(await gunzip(bytes)) as EncodedSave;
 
-  // Older saves are read on purpose: the simulation fills in anything a newer
-  // version added. A save from a *newer* version is the one we genuinely
-  // cannot read, because we do not know what it left out.
-  if (parsed.version > SAVE_VERSION) {
-    throw new Error(
-      `This save was made by a newer version of Bailiwick (${parsed.version}).`,
-    );
-  }
+  checkVersion(parsed.version);
 
   const snapshot: SimulationSnapshot = {
     ...parsed,

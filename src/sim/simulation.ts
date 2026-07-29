@@ -2,6 +2,7 @@ import { Direction, DIRECTIONS } from './core/direction';
 import { OUT_OF_BOUNDS } from './core/grid';
 import { Hasher } from './core/hash';
 import { Rng } from './core/rng';
+import { SAVE_VERSION } from './save-version';
 import type { BuildingInfo, BuildingType } from './data/buildings';
 import { BuildingType as Type, buildingInfo } from './data/buildings';
 import { Profession, professionInfo } from './data/professions';
@@ -327,15 +328,9 @@ type FieldWork = Extract<
   { kind: 'harvest' } | { kind: 'plant' } | { kind: 'extract' } | { kind: 'farm' }
 >;
 
-/**
- * Bumped whenever the shape of a saved game changes.
- *
- * Version 2 added ripening fields and a geologist's survey counter; version 3
- * replaced that counter with the flag whose ground he is working; version 4
- * added how long a building has been finding nothing. Older saves still load:
- * `fromSnapshot` fills in whatever they predate.
- */
-export const SAVE_VERSION = 5;
+// Re-exported so every existing importer keeps naming it here, while the
+// constant itself is a leaf that a page can read without loading the game.
+export { SAVE_VERSION } from './save-version';
 
 /** The parts of the map that play can change, and so must be saved. */
 export interface MapSnapshot {
