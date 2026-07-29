@@ -3,7 +3,7 @@
       <path d="M24 12 34 19v13H14V19z" fill="#f4e8ce"/>
       <rect x="20" y="24" width="8" height="8" fill="#9c4128"/>
     </svg>
-`,qr=`<svg viewBox="168 22 504 322" role="img" aria-label="An isometric settlement: huts and a watchtower along a winding road, bordered by water, forest and snow-capped mountains.">
+`,qr=`<svg viewBox="164 74 512 256" role="img" aria-label="An isometric settlement: huts and a watchtower along a winding road, bordered by water, forest and snow-capped mountains.">
     <g class="terrain">
       <polygon points="420,74 452,90 420,106 388,90" fill="#4a86a8" stroke="#3d7291" stroke-width="0.5"/>
       <polygon points="452,90 484,106 452,122 420,106" fill="#4a86a8" stroke="#3d7291" stroke-width="0.5"/>

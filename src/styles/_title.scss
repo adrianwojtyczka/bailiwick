@@ -17,6 +17,14 @@
   max-width: 42rem;
   overflow-y: auto;
   text-align: center;
+
+  // A bounded flex column shrinks its children before it overflows, and the
+  // scene clips whatever it is given rather than scaling to it — so on a short
+  // screen the illustration was squeezed into a strip instead of the column
+  // scrolling. Scrolling is what this box is for; nothing in it is compressible.
+  > * {
+    flex-shrink: 0;
+  }
 }
 
 .title__header {

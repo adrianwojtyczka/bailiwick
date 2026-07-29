@@ -444,3 +444,56 @@ test('the title screen scrolls when it does not fit', async ({ page }) => {
   // And the thing the player came for is reachable once it has scrolled.
   await expect(page.getByRole('button', { name: 'New game' })).toBeVisible();
 });
+
+test('the title illustration is shown whole', async ({ page }) => {
+  // A short screen: the case where a bounded flex column squeezed the scene
+  // into a strip instead of scrolling.
+  await page.setViewportSize({ width: 400, height: 460 });
+  await page.goto('/');
+  await expect(page.locator('.title__name')).toHaveText('Bailiwick');
+
+  const scene = page.locator('.title__scene svg');
+  await expect(scene).toBeVisible();
+
+  const framing = await scene.evaluate((node) => {
+    const svg = node as SVGSVGElement;
+    const box = svg.getBBox();
+    const view = svg.viewBox.baseVal;
+    const drawn = svg.getBoundingClientRect();
+    // The frame around it, which is what a bounded flex column crushes: the
+    // svg keeps its own size and `overflow: hidden` simply cuts it off.
+    const frame = (svg.parentElement as HTMLElement).getBoundingClientRect();
+    return {
+      left: box.x - view.x,
+      top: box.y - view.y,
+      right: view.x + view.width - (box.x + box.width),
+      bottom: view.y + view.height - (box.y + box.height),
+      width: drawn.width,
+      height: drawn.height,
+      frameHeight: frame.height,
+    };
+  });
+
+  // Nothing cropped: every edge of the drawing sits inside the frame. Four
+  // units used to be shaved off each side.
+  expect(framing.left).toBeGreaterThanOrEqual(0);
+  expect(framing.top).toBeGreaterThanOrEqual(0);
+  expect(framing.right).toBeGreaterThanOrEqual(0);
+  expect(framing.bottom).toBeGreaterThanOrEqual(0);
+
+  // And no dead margin either: the frame was a fifth taller than the artwork,
+  // which showed as a band of empty parchment above the mountains.
+  for (const slack of [framing.left, framing.top, framing.right, framing.bottom]) {
+    expect(slack).toBeLessThanOrEqual(2);
+  }
+
+  // Drawn at its own shape: the artwork is exactly 2:1.
+  expect(framing.width).toBeGreaterThan(0);
+  expect(framing.height).toBeCloseTo(framing.width / 2, 0);
+
+  // And the frame shows all of it. A bounded flex column shrinks its children
+  // before it overflows, and this one clips rather than scales — on a short
+  // screen the box collapsed to two pixels and the picture vanished, while the
+  // svg inside went on reporting its full size.
+  expect(framing.frameHeight).toBeGreaterThanOrEqual(framing.height);
+});
