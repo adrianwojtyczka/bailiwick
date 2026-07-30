@@ -176,6 +176,8 @@ export const SettlerState = {
   WaitingToFight: 16,
   /** A soldier out on his building's door, holding it against an attacker. */
   Defending: 17,
+  /** A soldier outside a building his side has just taken, waiting to go in. */
+  WaitingToEnter: 18,
 } as const;
 
 export type SettlerState = (typeof SettlerState)[keyof typeof SettlerState];
@@ -198,6 +200,13 @@ export interface Settler {
   /** Remaining points to walk, excluding the one under foot. */
   path: number[];
   pathIndex: number;
+
+  /**
+   * The outpost a soldier marched out of, so a man with nowhere to go at the
+   * end of a fight walks back to it rather than to the nearest store. Nought
+   * for everybody else, and in saves older than version 8.
+   */
+  homePost: number;
 
   /** The ware in hand, or null. */
   carrying: Ware | null;

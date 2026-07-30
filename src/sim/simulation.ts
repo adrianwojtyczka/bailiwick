@@ -76,6 +76,24 @@ const RIVAL_OUTPOST_REACH = 6;
 const TERRITORY_BITE = 4;
 
 /**
+ * A headquarters outranks every outpost, whatever its reach — the only way to
+ * move a hall's border is to take the hall.
+ */
+const HEADQUARTERS_RANK = 100;
+
+/**
+ * How many of its six neighbours a point needs to count as really held, and the
+ * most times the edges are swept before giving up. See `settleTheEdges`.
+ *
+ * A sweep normally settles in one or two passes; the cap is there so that a
+ * shape which somehow will not settle costs a bounded amount rather than
+ * spinning. Only genuine one-node tendrils erode at three neighbours — a
+ * province of any width is untouched — where at four a third of the map goes.
+ */
+const EDGE_NEIGHBOURS = 3;
+const EDGE_PASSES = 16;
+
+/**
  * How far an outpost can send men, and how many of its spare men reach.
  *
  * The frontier is what carries a war forward: to reach further into a
@@ -443,6 +461,8 @@ interface Claimant {
   readonly point: number;
   readonly radius: number;
   readonly bite: number;
+  /** How much its kind counts for: see `claimRankOf`. */
+  readonly rank: number;
   readonly player: number;
 }
 
@@ -523,13 +543,23 @@ export class Simulation {
       simulation.players.push({ id, name: config.name, colour: config.colour, headquarters: 0 });
 
       const point = startPoints[slot]!;
-      simulation.claimTerritory(point, HEADQUARTERS_RADIUS, id);
+      // A foothold first: a hall cannot raise its flag on ground nobody owns —
+      // nothing may stand on a frontier node, so the flag's own neighbours
+      // must be his too — and the first building on an island has to stand
+      // somewhere before there is anything to work a border out from. Two
+      // nodes, well inside the nine the hall is about to hold.
+      for (const near of simulation.world.grid.pointsWithin(point, 2)) {
+        simulation.world.owner[near] = id;
+      }
 
       const headquarters = simulation.createBuilding(Type.Headquarters, point, id);
       if (!headquarters) throw new Error('the generated start site could not take a headquarters');
 
       headquarters.state = BuildingState.Complete;
       headquarters.status = BuildingStatus.Working;
+      // After the hall stands, not before: ground is worked out from the
+      // buildings that hold it, so there has to be a building to hold it.
+      simulation.redrawTerritory(point, HEADQUARTERS_RADIUS);
       for (const entry of STARTING_STOCK) {
         headquarters.stock[entry.ware] = (headquarters.stock[entry.ware] ?? 0) + entry.count;
       }
@@ -578,7 +608,7 @@ export class Simulation {
       outpost.state = BuildingState.Complete;
       outpost.status = BuildingStatus.Working;
       outpost.garrison[Rank.Private] = behaviour.garrison;
-      this.claimTerritory(point, behaviour.radius, owner);
+      this.redrawTerritory(point, behaviour.radius);
       raised += 1;
     }
   }
@@ -706,6 +736,7 @@ export class Simulation {
         // a time is a conjuring trick rather than a sortie.
         const soldier = this.createSettler(player, Profession.Soldier, post.point);
         soldier.rank = rank;
+        soldier.homePost = post.id;
         soldier.building = target.id;
         soldier.taskPoint = this.nextStandingPlace(target);
         soldier.state = SettlerState.Mustering;
@@ -821,11 +852,12 @@ export class Simulation {
 
     if (!this.takeTheDoorway(post)) return;
 
-    // His standing place may be unreachable when the flag itself is not —
-    // rock behind the walls, or a queue that has wound into a corner.
+    // Out by his own flag, the way every settler in the game leaves a
+    // building, and only then across country. His standing place may be
+    // unreachable when the flag itself is not — rock behind the walls, or a
+    // queue that has wound into a corner.
     const path =
-      walkablePath(this.world, post.point, settler.taskPoint) ??
-      walkablePath(this.world, post.point, target.flagPoint);
+      this.pathOutOf(post, settler.taskPoint) ?? this.pathOutOf(post, target.flagPoint);
     if (!path) {
       this.standDown(settler, post);
       return;
@@ -839,6 +871,23 @@ export class Simulation {
     settler.taskPoint = path[path.length - 1]!;
     settler.state = SettlerState.MarchingToAttack;
     this.setPath(settler, path);
+  }
+
+  /**
+   * A route out of a building's door that goes by its flag first.
+   *
+   * A building has one way out and it is the doorstep, so a man setting off
+   * across country still steps onto his own flag before he goes anywhere —
+   * which is what `surveyDoorways` watches for, and what everybody else in the
+   * game already does.
+   */
+  private pathOutOf(building: Building, to: number): number[] | undefined {
+    if (to === building.point) return [];
+    if (to === building.flagPoint) return [building.flagPoint];
+
+    const onward = walkablePath(this.world, building.flagPoint, to);
+    if (!onward) return undefined;
+    return [building.flagPoint, ...onward];
   }
 
   /**
@@ -858,6 +907,129 @@ export class Simulation {
     settler.state =
       settler.point === target.flagPoint ? SettlerState.Fighting : SettlerState.WaitingToFight;
     settler.taskTimer = DUEL_TICKS;
+  }
+
+  /**
+   * The men outside a building their side has just taken go in, one at a time.
+   *
+   * Possession is walked, not granted: the nearest man goes by the flag and
+   * then the door while the rest wait where they stood, and only when he is
+   * inside does the next set off. The place fills to what it can hold —
+   * `joinGarrison` counts that — and whoever is left over walks back to the
+   * post he marched out of.
+   */
+  private takePossession(): void {
+    const waiting = new Map<number, Settler[]>();
+    const onTheWay = new Set<number>();
+
+    this.settlers.forEach((settler) => {
+      if (settler.state === SettlerState.WaitingToEnter) {
+        const at = waiting.get(settler.building);
+        if (at) at.push(settler);
+        else waiting.set(settler.building, [settler]);
+        return;
+      }
+      // Somebody already walking in — a man of the storming party or a
+      // replacement sent up from a store, it makes no difference to the door.
+      if (settler.state === SettlerState.WalkingToJob && settler.profession === Profession.Soldier) {
+        onTheWay.add(settler.building);
+      }
+    });
+
+    for (const [buildingId, men] of waiting) {
+      const post = this.buildings.get(buildingId);
+      const behaviour = post ? buildingInfo(post.type).behaviour : undefined;
+
+      if (!post || !behaviour || behaviour.kind !== 'military' || post.owner !== men[0]!.owner) {
+        // Lost again, or pulled down under them.
+        for (const man of men) this.goBackToPost(man);
+        continue;
+      }
+
+      const room = behaviour.garrison - garrisonStrength(post.garrison) - post.garrisonRequested;
+      if (room <= 0) {
+        for (const man of men) this.goBackToPost(man);
+        continue;
+      }
+      if (onTheWay.has(buildingId)) continue;
+
+      // Nearest first, lowest id to split a tie, so the order never depends on
+      // which way the settler table happens to be walked.
+      let next: Settler | undefined;
+      let nearest = Number.POSITIVE_INFINITY;
+      for (const man of men) {
+        const distance = this.world.grid.distance(man.point, post.flagPoint);
+        if (distance > nearest) continue;
+        if (distance === nearest && next && man.id >= next.id) continue;
+        nearest = distance;
+        next = man;
+      }
+      if (!next) continue;
+
+      const path = this.pathInTo(post, next.point);
+      if (!path) {
+        this.goBackToPost(next);
+        continue;
+      }
+
+      next.state = SettlerState.WalkingToJob;
+      post.garrisonRequested += 1;
+      if (path.length === 0) {
+        this.joinGarrison(next);
+        continue;
+      }
+      this.redirect(next, path);
+    }
+  }
+
+  /**
+   * A route into a building that goes by its flag and then its door — the way
+   * in is the way out, walked backwards.
+   */
+  private pathInTo(building: Building, from: number): number[] | undefined {
+    if (from === building.point) return [];
+    if (from === building.flagPoint) return [building.point];
+
+    const toFlag = walkablePath(this.world, from, building.flagPoint);
+    if (!toFlag) return undefined;
+    return [...toFlag, building.point];
+  }
+
+  /**
+   * A soldier with nothing left to do walks back to the outpost he marched out
+   * of, rather than to the nearest store.
+   *
+   * The post may be full by the time he arrives, or gone altogether;
+   * `joinGarrison` turns him away in the first case and `sendHome` catches the
+   * second, so he is never left standing in a field.
+   */
+  private goBackToPost(settler: Settler): void {
+    const post = this.buildings.get(settler.homePost);
+    const behaviour = post ? buildingInfo(post.type).behaviour : undefined;
+
+    if (!post || !behaviour || behaviour.kind !== 'military' || post.owner !== settler.owner) {
+      this.sendHome(settler);
+      return;
+    }
+    if (garrisonStrength(post.garrison) + post.garrisonRequested >= behaviour.garrison) {
+      this.sendHome(settler);
+      return;
+    }
+
+    const path = this.pathInTo(post, this.committedPoint(settler));
+    if (!path) {
+      this.sendHome(settler);
+      return;
+    }
+
+    settler.building = post.id;
+    settler.state = SettlerState.WalkingToJob;
+    post.garrisonRequested += 1;
+    if (path.length === 0) {
+      this.joinGarrison(settler);
+      return;
+    }
+    this.redirect(settler, path);
   }
 
   /**
@@ -1067,7 +1239,6 @@ export class Simulation {
     const loser = target.owner;
     const winner = attackers[0]!.owner;
 
-    const radius = behaviour.kind === 'military' ? behaviour.radius : HEADQUARTERS_RADIUS;
     const headquarters = behaviour.kind === 'headquarters';
 
     if (headquarters) {
@@ -1087,19 +1258,25 @@ export class Simulation {
     target.owner = winner;
     target.garrison.fill(0);
     target.garrisonRequested = 0;
-    target.status = BuildingStatus.Working;
+    target.defenderDelay = 0;
+    // Empty, and holding nothing until somebody is inside it — exactly a
+    // newly built post. The ground goes over when the first man is in, which
+    // is why there is no redraw here.
+    target.status = BuildingStatus.Unmanned;
     this.world.outpost[target.point] = winner;
 
     const flagId = this.world.flag[target.flagPoint];
     const flag = flagId ? this.flags.get(flagId) : undefined;
     if (flag) flag.owner = winner;
 
+    // The men do not blink inside: they wait where they stood and go in one at
+    // a time by the flag and the door, and whoever finds it full walks back to
+    // the post he set out from.
     for (const attacker of attackers) {
-      target.garrison[attacker.rank] = (target.garrison[attacker.rank] ?? 0) + 1;
-      this.settlers.remove(attacker.id);
+      attacker.state = SettlerState.WaitingToEnter;
+      attacker.taskTimer = 0;
     }
 
-    this.redrawTerritory(target.point, radius);
     this.note(
       `${buildingInfo(target.type).name} taken from the ${this.nameOf(loser)}.`,
       MessageCategory.Battle,
@@ -1280,6 +1457,7 @@ export class Simulation {
     // After they have moved and before anybody else is sent out, so a store
     // knows whether its own doorstep is clear.
     this.surveyDoorways();
+    this.takePossession();
     this.updateBuildings();
     this.updateRoads();
     this.growTrees();
@@ -1529,6 +1707,7 @@ export class Simulation {
       taskTimer: 0,
       surveyFrom: 0,
       rank: 0,
+      homePost: 0,
     }));
   }
 
@@ -1973,44 +2152,32 @@ export class Simulation {
    * and moves further for a bigger building: two nodes for a barracks, three
    * for a fortress.
    */
-  private claimTerritory(centre: number, radius: number, player: number): void {
-    const bite = Math.floor(radius / TERRITORY_BITE);
-    const overrun: Overrun[] = [];
-
-    for (const point of this.world.grid.pointsWithin(centre, radius)) {
-      const owner = this.world.owner[point]!;
-      if (owner === player) continue;
-
-      if (owner === 0) {
-        this.world.owner[point] = player;
-        continue;
-      }
-
-      if (this.world.grid.distance(centre, point) > bite) continue;
-      this.world.owner[point] = player;
-      overrun.push({ point, loser: owner });
-    }
-
-    this.razeGround(overrun);
-  }
-
   /**
    * Works out afresh who holds every point in an area.
    *
-   * Ownership used to be patched: laid down when a building was raised and
-   * flipped wholesale when one was captured, which meant a captured outpost's
-   * radius went over even where the loser's headquarters still stood in the
-   * middle of it — one blow could take a whole province. Ground is instead
-   * *derived* here from the buildings that actually hold it, so a capture
-   * changes exactly what the loser can no longer cover and no more.
+   * The one place ownership is ever decided. It used to be patched — laid down
+   * when a building was raised, flipped wholesale when one was captured — which
+   * meant two rules that could disagree, and a border nobody could predict from
+   * looking at the map. Ground is *derived* here instead, from the buildings
+   * that actually hold it, so what a player owns is always exactly what his
+   * buildings can cover.
    *
-   * Nearest claimant wins, except that a claimant within its own bite (see
-   * `claimTerritory`) beats a merely nearer one, which is what makes the two
-   * rules agree. Ties go to the lower player id, so the answer never depends on
-   * the order buildings happen to sit in.
+   * Of the claimants covering a point, the strongest holds it:
    *
-   * Called when ground can have changed hands — a capture, a demolition — and
-   * never on the ordinary beat: a fortress covers some five hundred points.
+   *  1. one within its own bite — a quarter of its radius — beats anything,
+   *     which is what keeps a post standing on ground of its own however big
+   *     the building glowering at it from across the border;
+   *  2. then rank: a headquarters beats every outpost, and otherwise the longer
+   *     reach wins, so a barracks never out-claims a hall;
+   *  3. then the nearer;
+   *  4. then whoever holds it already, so a border does not shuffle about when
+   *     nothing has really changed;
+   *  5. then the lower player id, so the answer never depends on the order
+   *     buildings happen to sit in.
+   *
+   * Called when ground can have changed hands — a post manned, a building
+   * destroyed, a building captured — and never on the ordinary beat: a fortress
+   * covers some five hundred points.
    */
   private redrawTerritory(centre: number, radius: number): void {
     // A post whose last man is out on the door holding it is still held: his
@@ -2028,53 +2195,141 @@ export class Simulation {
         point: building.point,
         radius: reach,
         bite: Math.floor(reach / TERRITORY_BITE),
+        rank: this.claimRankOf(building),
         player: building.owner,
       });
     });
 
+    const area = this.world.grid.pointsWithin(centre, radius);
+    const before = new Map<number, number>();
+
+    for (const point of area) {
+      const held = this.world.owner[point]!;
+      before.set(point, held);
+      this.world.owner[point] = this.strongestClaimTo(point, claimants, held);
+    }
+
+    // The whole map, not merely what was redrawn: a point just outside the
+    // area can be left standing alone by what happened inside it, and trimming
+    // only as far as the area reaches leaves a fresh dot at its own edge. Two
+    // thirds of a millisecond against a tick of two hundred, and only when
+    // ground has actually moved.
+    this.settleTheEdges([...this.world.owner.keys()]);
+
     const overrun: Overrun[] = [];
-
-    for (const point of this.world.grid.pointsWithin(centre, radius)) {
-      const before = this.world.owner[point]!;
-      const holder = this.strongestClaimTo(point, claimants);
-      if (holder === before) continue;
-
-      this.world.owner[point] = holder;
-      // Ground that merely falls out of a province — a post pulled down with
-      // nothing behind it — leaves what stands on it alone. Only ground taken
-      // by somebody is cleared.
-      if (before !== 0 && holder !== 0) overrun.push({ point, loser: before });
+    for (const [point, held] of before) {
+      // Ground given up is cleared whether somebody else took it or it simply
+      // fell out of the province: a hut left standing beyond a border its owner
+      // no longer holds is a hut he has no business keeping.
+      if (held !== 0 && this.world.owner[point] !== held) overrun.push({ point, loser: held });
     }
 
     this.razeGround(overrun);
+
+    // The border has moved, so which posts look across at somebody else has
+    // too — and that is what decides how many men each of them wants. Worked
+    // out now rather than on the sweep beat, so a post that has just won a
+    // fight starts filling itself against the frontier as it now stands.
+    this.surveyFrontier();
   }
 
   /** Who holds a point, of the buildings covering it. */
-  private strongestClaimTo(point: number, claimants: readonly Claimant[]): number {
+  private strongestClaimTo(
+    point: number,
+    claimants: readonly Claimant[],
+    incumbent: number,
+  ): number {
     let holder = 0;
-    let nearest = Number.POSITIVE_INFINITY;
-    let held = false;
+    let best: readonly [number, number, number, number] | undefined;
 
     for (const claim of claimants) {
       const distance = this.world.grid.distance(claim.point, point);
       if (distance > claim.radius) continue;
 
-      const inBite = distance <= claim.bite;
-      if (held && !inBite) continue;
-      if (inBite && !held) {
-        holder = claim.player;
-        nearest = distance;
-        held = true;
-        continue;
-      }
-      if (distance > nearest) continue;
-      if (distance === nearest && claim.player >= holder) continue;
+      const score = [
+        distance <= claim.bite ? 1 : 0,
+        claim.rank,
+        -distance,
+        claim.player === incumbent ? 1 : 0,
+      ] as const;
 
+      if (best !== undefined) {
+        const better = score.findIndex((value, at) => value !== best![at]);
+        if (better < 0 ? claim.player >= holder : score[better]! < best[better]!) continue;
+      }
+
+      best = score;
       holder = claim.player;
-      nearest = distance;
     }
 
     return holder;
+  }
+
+  /**
+   * How much a building's kind counts for when two of them cover the same
+   * ground: a headquarters above every outpost, and otherwise the longer reach.
+   *
+   * Without this the nearest building simply won, so a barracks put up four
+   * nodes from a hall took a third of the hall's own ground — a smaller post
+   * out-claiming a bigger one, which is not how a province should read.
+   */
+  private claimRankOf(building: Building): number {
+    const behaviour = buildingInfo(building.type).behaviour;
+    if (behaviour.kind === 'headquarters') return HEADQUARTERS_RANK;
+    return behaviour.kind === 'military' ? behaviour.radius : 0;
+  }
+
+  /**
+   * Rubs the single dots off a border.
+   *
+   * A claim is a hexagon, and a hexagon's corners come to a point one row wide.
+   * Drawn, those corners are lone dots hanging off the edge of a province with
+   * nothing either side of them. A point with fewer than three of its six
+   * neighbours held by the same player is not really held: it goes to whoever
+   * holds most of the ground around it, or to nobody.
+   *
+   * Repeated until nothing moves, which on real borders is one pass: at two
+   * neighbours it clears the corners and stops, where at three it would eat a
+   * third of the map and never settle.
+   */
+  private settleTheEdges(area: readonly number[]): void {
+    let looking: readonly number[] = area;
+
+    for (let pass = 0; pass < EDGE_PASSES && looking.length > 0; pass += 1) {
+      const changes: { point: number; owner: number }[] = [];
+
+      for (const point of looking) {
+        const owner = this.world.owner[point]!;
+        if (owner === 0) continue;
+
+        const around = new Map<number, number>();
+        let mine = 0;
+        for (const neighbour of this.world.grid.pointsWithin(point, 1)) {
+          if (neighbour === point) continue;
+          const held = this.world.owner[neighbour]!;
+          around.set(held, (around.get(held) ?? 0) + 1);
+          if (held === owner) mine += 1;
+        }
+        if (mine >= EDGE_NEIGHBOURS) continue;
+
+        // To whoever holds most of the ground about it — nobody included, and
+        // by the lower id on a tie so the sweep is not order-dependent.
+        let taker = 0;
+        let most = -1;
+        for (const [candidate, count] of around) {
+          if (count > most || (count === most && candidate < taker)) {
+            taker = candidate;
+            most = count;
+          }
+        }
+        changes.push({ point, owner: taker === owner ? 0 : taker });
+      }
+
+      if (changes.length === 0) return;
+      for (const change of changes) this.world.owner[change.point] = change.owner;
+
+      looking = area;
+    }
   }
 
   /**
@@ -2109,8 +2364,12 @@ export class Simulation {
 
     const doomedBuildings: Building[] = [];
     const doomedFlags: Flag[] = [];
+    const doomedRoads: Road[] = [];
 
+    const lost = new Set<number>();
     for (const { point, loser } of overrun) {
+      lost.add(point);
+
       const buildingId = this.world.building[point];
       const building = buildingId ? this.buildings.get(buildingId) : undefined;
       if (building && building.owner === loser) doomedBuildings.push(building);
@@ -2119,6 +2378,15 @@ export class Simulation {
       const flag = flagId ? this.flags.get(flagId) : undefined;
       if (flag && flag.owner === loser) doomedFlags.push(flag);
     }
+
+    // A road may only be laid on its owner's own ground, so a stretch running
+    // over ground he has lost is a road that should not exist — and its flags
+    // can both still be his, which is why the ends are not enough to find it.
+    this.roads.forEach((road) => {
+      if (road.points.some((point) => lost.has(point) && this.world.owner[point] !== road.owner)) {
+        doomedRoads.push(road);
+      }
+    });
 
     for (const building of doomedBuildings) {
       // Ids are recycled, so a building noted a moment ago can already be
@@ -2137,6 +2405,12 @@ export class Simulation {
       // Torn, not merged: joining the two stretches that met here would leave a
       // road running through ground its owner has just lost.
       this.destroyFlag(flag, false);
+    }
+
+    // Last, and only what the flags did not already take with them.
+    for (const road of doomedRoads) {
+      if (this.roads.get(road.id) !== road) continue;
+      this.destroyRoad(road);
     }
   }
 
@@ -2356,6 +2630,11 @@ export class Simulation {
       case SettlerState.Defending:
         // The fight itself is resolved building by building in `fightBattles`,
         // so that one blow lands at a time however many men are stood there.
+        return;
+
+      case SettlerState.WaitingToEnter:
+        // Likewise the going in, in `takePossession`: one man at a time
+        // through the flag and the door.
         return;
 
       case SettlerState.AtWork:
@@ -4430,9 +4709,15 @@ export class Simulation {
 
     building.garrisonRequested = Math.max(0, building.garrisonRequested - 1);
 
-    // Somebody else filled the last place. Rather than crowd in, he turns round.
+    // Somebody else filled the last place. Rather than crowd in, he turns
+    // round — back to the post he marched out of if he has one, and to the
+    // nearest store if he has not.
     const held = garrisonStrength(building.garrison);
     if (held >= behaviour.garrison) {
+      if (settler.homePost !== 0 && settler.homePost !== building.id) {
+        this.goBackToPost(settler);
+        return;
+      }
       this.sendHome(settler);
       return;
     }
@@ -4442,7 +4727,7 @@ export class Simulation {
     this.settlers.remove(settler.id);
 
     if (held === 0) {
-      this.claimTerritory(building.point, behaviour.radius, building.owner);
+      this.redrawTerritory(building.point, behaviour.radius);
       this.note(
         `${info.name} manned, claiming new ground.`,
         MessageCategory.Territory,
@@ -4878,8 +5163,21 @@ export class Simulation {
         ...settler,
         surveyFrom: settler.surveyFrom ?? 0,
         rank: settler.rank ?? 0,
+        // Saves written before men walked home from a fight have no post to
+        // walk back to, which sends them to the nearest store as they used to.
+        homePost: settler.homePost ?? 0,
       })),
     );
+
+    // Borders drawn before the edges were swept have the hexagon corners still
+    // on them — lone dots hanging off a province with nothing either side. The
+    // sweep is run once over the whole map so an old save comes up looking like
+    // a new one. Only the sweep: working the *whole* border out again would
+    // hand back ground buildings have long stood on, and pull those buildings
+    // down with it. Ground is re-derived as it changes hands, not on loading.
+    if (snapshot.version < 8) {
+      simulation.settleTheEdges([...simulation.world.owner.keys()]);
+    }
 
     return simulation;
   }
