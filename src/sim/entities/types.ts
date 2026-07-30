@@ -120,6 +120,14 @@ export interface Building {
    * down. Absent in saves older than version 7.
    */
   defenderDelay: number;
+  /**
+   * The tick this building's garrison first held a man, which settles a border
+   * that two sides push on exactly as hard: the one manned longest keeps it.
+   * Nought for anything that has never been manned, and in saves older than
+   * version 9 — which reads as "since the beginning", right for a post that has
+   * been standing however long the save has been going.
+   */
+  mannedAt: number;
 }
 
 export const BuildingStatus = {
@@ -178,6 +186,8 @@ export const SettlerState = {
   Defending: 17,
   /** A soldier outside a building his side has just taken, waiting to go in. */
   WaitingToEnter: 18,
+  /** Nowhere left of his own to go: wandering, and not for long. */
+  Lost: 19,
 } as const;
 
 export type SettlerState = (typeof SettlerState)[keyof typeof SettlerState];

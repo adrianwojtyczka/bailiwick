@@ -40,11 +40,13 @@ const MIN_PLAYER_SEPARATION = 18;
 const START_CLEAR_RADIUS = 3;
 
 /**
- * How far a headquarters claims, matching `HEADQUARTERS_RADIUS` in the
- * simulation. Wood and stone have to fall inside it to be of any use on the
- * first day.
+ * How near a start its opening wood and stone must be.
+ *
+ * Not the whole of what a headquarters claims — that is a fortress's thirteen
+ * nodes, and timber at the far edge of it is no use on the first morning. This
+ * is the ground a first road can reach, and what the guarantee is counted over.
  */
-const START_TERRITORY_RADIUS = 9;
+const START_SUPPLY_RADIUS = 9;
 
 /** Wood and stone a start is guaranteed within its own borders. */
 const START_TREES = 20;
@@ -538,7 +540,7 @@ function stockStartArea(world: World, point: number, seed: number): void {
 
   let trees = 0;
   let outcrops = 0;
-  for (const candidate of grid.pointsWithin(point, START_TERRITORY_RADIUS)) {
+  for (const candidate of grid.pointsWithin(point, START_SUPPLY_RADIUS)) {
     if (world.object[candidate] === MapObject.Tree) trees += 1;
     if (world.object[candidate] === MapObject.Stone) outcrops += 1;
   }

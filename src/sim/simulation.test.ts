@@ -23,8 +23,10 @@ import {
   BuildSpace,
   canHostSize,
   canPlaceFlag,
+  canPlaceOutpost,
   evaluateBuildSpace,
   FLAG_DIRECTION,
+  isWellInsideTerritory,
   OUTPOST_SPACING,
 } from './world/buildspace';
 import {
@@ -68,6 +70,11 @@ function siteFor(
     if (sim.world.grid.distance(hq.point, point) < 3) continue;
     const space = evaluateBuildSpace(sim.world, point, PLAYER);
     if (space === BuildSpace.None || !canHostSize(space, info.size)) continue;
+    // Posts keep their distance from one another and from the hall, so a site
+    // the game would refuse is no site at all.
+    if (info.behaviour.kind === 'military' && !canPlaceOutpost(sim.world, point, PLAYER)) {
+      continue;
+    }
 
     let score = 1;
     if (prefers !== null) {
@@ -88,6 +95,25 @@ function siteFor(
 }
 
 /** Places a building and connects its flag to the headquarters by road. */
+/**
+ * A site out at the edge of the hall's own claim.
+ *
+ * A post well inside a province takes no new ground — the hall already holds
+ * it — so anything testing a *claim* has to stand at the frontier, where there
+ * is unowned ground within reach to take.
+ */
+function edgeSite(sim: Simulation, type: BuildingType): number | undefined {
+  const hq = headquarters(sim);
+  const info = buildingInfo(type);
+
+  for (const point of [...sim.world.grid.pointsWithin(hq.point, 13)].reverse()) {
+    const space = evaluateBuildSpace(sim.world, point, PLAYER);
+    if (space === BuildSpace.None || !canHostSize(space, info.size)) continue;
+    return point;
+  }
+  return undefined;
+}
+
 function buildAndConnect(
   sim: Simulation,
   type: BuildingType,
@@ -139,6 +165,11 @@ function buildOverWater(sim: Simulation): number | undefined {
     if (sim.world.grid.distance(hq.point, point) < 3) continue;
     const space = evaluateBuildSpace(sim.world, point, PLAYER);
     if (space === BuildSpace.None || !canHostSize(space, info.size)) continue;
+    // Posts keep their distance from one another and from the hall, so a site
+    // the game would refuse is no site at all.
+    if (info.behaviour.kind === 'military' && !canPlaceOutpost(sim.world, point, PLAYER)) {
+      continue;
+    }
 
     const wet = sim.world.grid
       .pointsWithin(point, 2)
@@ -457,7 +488,7 @@ describe('determinism', () => {
     // deliberately, never reflexively.
     const sim = newGame(4242);
     run(sim, 1000);
-    expect(sim.hash()).toMatchInlineSnapshot(`"d6cf0be3"`);
+    expect(sim.hash()).toMatchInlineSnapshot(`"289ab9e3"`);
   });
 });
 
@@ -1345,8 +1376,14 @@ describe('geologists', () => {
 describe('outposts', () => {
   it('claims new ground when one is finished', () => {
     const sim = newGame();
-    const id = buildAndConnect(sim, BuildingType.Guardhouse)!;
-    expect(id).toBeDefined();
+    // Out at the edge of the hall's own claim: a post well inside it takes
+    // nothing new, so a site near the door would prove nothing about claiming.
+    const site = edgeSite(sim, BuildingType.Guardhouse)!;
+    expect(site).toBeDefined();
+    expect(sim.placeBuilding(PLAYER, site, BuildingType.Guardhouse).ok).toBe(true);
+    const id = sim.buildings.find((candidate) => candidate.point === site)!.id;
+    const route = planRoad(sim.world, headquarters(sim).flagPoint, sim.buildings.require(id).flagPoint, PLAYER);
+    if (route) sim.placeRoad(PLAYER, route);
 
     let owned = 0;
     for (let point = 0; point < sim.world.grid.size; point += 1) {
@@ -2096,7 +2133,7 @@ describe('the frontier', () => {
     let frontierPoints = 0;
     let placeable = 0;
 
-    for (const point of sim.world.grid.pointsWithin(hq.point, 12)) {
+    for (const point of sim.world.grid.pointsWithin(hq.point, 15)) {
       if (sim.world.owner[point] !== PLAYER) continue;
 
       if (onFrontier(point)) {
@@ -3777,12 +3814,17 @@ describe('raising an army', () => {
     const sim = newGame();
     const hq = headquarters(sim);
 
-    // Nobody to send, so the barracks can be finished and left empty.
+    // Nobody to send, so the barracks can be finished and left empty. Out at
+    // the frontier, where there is unowned ground for it to take once it is
+    // manned — inside the hall's own claim it would take nothing either way.
     hq.garrison.fill(0);
 
-    const id = buildAndConnect(sim, BuildingType.Barracks)!;
-    expect(id).toBeDefined();
-    const barracks = sim.buildings.require(id);
+    const site = edgeSite(sim, BuildingType.Barracks)!;
+    expect(site).toBeDefined();
+    expect(sim.placeBuilding(PLAYER, site, BuildingType.Barracks).ok).toBe(true);
+    const barracks = sim.buildings.find((candidate) => candidate.point === site)!;
+    const route = planRoad(sim.world, hq.flagPoint, barracks.flagPoint, PLAYER);
+    if (route) sim.placeRoad(PLAYER, route);
 
     let built = false;
     for (let i = 0; i < 3000 && !built; i += 1) {
@@ -4219,9 +4261,13 @@ describe('which store supplies a site', () => {
     wrong.wares.push({ ware: Ware.Board, destination: building.id });
     const parcel = wrong.wares[wrong.wares.length - 1]!;
 
-    // The next sweep should send it back into the storehouse rather than let it
-    // walk the length of the province.
-    run(sim, 45);
+    // The sweep itself, rather than a tick that happens to contain one: within
+    // a tick the carriers move first, so left to the clock one of them collects
+    // the crate before the sweep can look at the flag — which proves nothing
+    // either way about the rule under test.
+    (sim as unknown as { turnBackDistantSupply(): void }).turnBackDistantSupply();
+
+    // Back into the storehouse rather than walking the length of the province.
     expect(parcel.destination).toBe(store.id);
   });
 });
@@ -4404,6 +4450,9 @@ describe('outposts keeping their distance', () => {
 describe('a war', () => {
   const RIVAL = 2;
 
+  /** How far a headquarters holds ground: a fortress's reach. */
+  const HALL_REACH = 13;
+
   /**
    * The simulation's private workings, for setting up a battle.
    *
@@ -4417,6 +4466,8 @@ describe('a war', () => {
     exchangeBlows(target: Building, attacker: Settler, defender: Settler): void;
     joinGarrison(settler: Settler): void;
     pathOutOf(building: Building, to: number): number[] | undefined;
+    destroyBuilding(building: Building): void;
+    sendHome(settler: Settler): void;
   }
 
   /** Every state a soldier passes through between the order and the outcome. */
@@ -4541,6 +4592,38 @@ describe('a war', () => {
 
     post.garrison.fill(0);
     post.garrison[Rank.Private] = men;
+  }
+
+  /**
+   * A manned post of the player's out beyond the hall's own reach, with open
+   * ground about it.
+   *
+   * Distance alone is not enough: the ring beyond a hall is as likely to be
+   * mountain as meadow, and a post in the rocks has nowhere to put the hut or
+   * the flag a test wants to stand beside it. Sites are tried until one has
+   * room, and the post is manned through its door so its claim is real.
+   */
+  function baseBeyond(sim: Simulation, home: number, men: number): Building {
+    for (let to = 16; to <= 22; to += 1) {
+      let post: Building;
+      try {
+        post = baseNear(sim, home, men, to - 1, to);
+      } catch {
+        continue;
+      }
+      holdIt(sim, post);
+
+      const room = sim.world.grid
+        .pointsWithin(post.point, 6)
+        .filter(
+          (point) =>
+            sim.world.grid.distance(home, point) > HALL_REACH &&
+            sim.world.owner[point] === PLAYER &&
+            canHostSize(evaluateBuildSpace(sim.world, point, PLAYER), BuildingSize.Hut),
+        );
+      if (room.length > 0) return post;
+    }
+    throw new Error('nowhere beyond the hall with room to build');
   }
 
   /** Plants a finished hut of somebody's on the first of these points it fits. */
@@ -4845,8 +4928,11 @@ describe('a war', () => {
   it('gives up the ground of a post that is pulled down', () => {
     const sim = contested();
     const home = sim.buildings.require(sim.players[0]!.headquarters).point;
-    const first = baseNear(sim, home, 3, 11, 15);
+    // Beyond the hall's own reach, or the hall would hold this ground whatever
+    // became of the post standing on it.
+    const first = baseBeyond(sim, home, 3);
     const second = baseNear(sim, first.point, 3, 5, 8);
+    holdIt(sim, second);
 
     // Ground only the first post covers, and ground the second covers too.
     const onlyFirst = sim.world.grid
@@ -4855,7 +4941,7 @@ describe('a war', () => {
         (point) =>
           sim.world.owner[point] === PLAYER &&
           sim.world.grid.distance(second.point, point) > 8 &&
-          sim.world.grid.distance(home, point) > 9,
+          sim.world.grid.distance(home, point) > HALL_REACH,
       );
     expect(onlyFirst).toBeDefined();
     const alsoSecond = sim.world.grid
@@ -4877,14 +4963,14 @@ describe('a war', () => {
     // A post of the player's just outside their claim, then manned. Only the
     // ground the *hall* holds is under test: against a post of his own rank a
     // barracks wins on nearness as it always did, and that is a different rule.
-    const post = baseNear(sim, theirs.point, 0, 10, 12);
+    const post = baseNear(sim, theirs.point, 0, 14, 16);
     const away = (point: number): number => sim.world.grid.distance(post.point, point);
+    // By distance, not by who holds them at this moment: `baseNear` paints
+    // ownership onto every site it tries before settling on one, so what the
+    // map says here is partly the harness's own doing.
     const his = sim.world.grid
       .pointsWithin(post.point, 8)
-      .filter(
-        (point) =>
-          sim.world.owner[point] === RIVAL && sim.world.grid.distance(theirs.point, point) <= 9,
-      );
+      .filter((point) => sim.world.grid.distance(theirs.point, point) <= HALL_REACH);
     expect(his.length).toBeGreaterThan(0);
 
     const soldier = sim.settlers.add(
@@ -4900,12 +4986,19 @@ describe('a war', () => {
     );
     reachIn(sim).joinGarrison(soldier);
 
-    // A barracks covers eight, so it grips two nodes and no more: a hall
-    // outranks it, and everything past the grip stays the hall's.
-    for (const point of his) {
-      const taken = sim.world.owner[point] === PLAYER;
-      expect(taken).toBe(away(point) <= 2);
-    }
+    // A barracks covers eight, so its grip is two nodes: everything that near
+    // is his whatever the hall brings to bear, which is what the grip is for.
+    const gripped = his.filter((point) => away(point) <= 2);
+    expect(gripped.length).toBeGreaterThan(0);
+    for (const point of gripped) expect(sim.world.owner[point]).toBe(PLAYER);
+
+    // Past the grip it is a question of pressure, and a hall pushing with a
+    // fortress's reach still holds ground deep inside its own claim.
+    const deep = his.filter(
+      (point) => away(point) > 2 && sim.world.grid.distance(theirs.point, point) <= 9,
+    );
+    expect(deep.length).toBeGreaterThan(0);
+    for (const point of deep) expect(sim.world.owner[point]).toBe(RIVAL);
   });
 
   it('offers all its spare men close by, and fewer further out', () => {
@@ -4961,7 +5054,7 @@ describe('a war', () => {
   it('holds ground from a headquarters and a manned post, never from a store', () => {
     const sim = contested();
     const mine = sim.buildings.require(sim.players[0]!.headquarters);
-    const post = baseNear(sim, mine.point, 3, 11, 15);
+    const post = baseBeyond(sim, mine.point, 3);
 
     // A store standing on ground the post holds, well clear of the hall.
     const site = sim.world.grid.pointsWithin(post.point, 7).find((point) => {
@@ -4988,7 +5081,7 @@ describe('a war', () => {
 
     // And the hall goes on holding every one of its own nine.
     expect(sim.world.owner[mine.point]).toBe(PLAYER);
-    for (const point of sim.world.grid.pointsWithin(mine.point, 9)) {
+    for (const point of sim.world.grid.pointsWithin(mine.point, HALL_REACH)) {
       expect(sim.world.owner[point]).toBe(PLAYER);
     }
   });
@@ -5102,61 +5195,303 @@ describe('a war', () => {
     expect(restored.buildings.require(target.id).owner).toBe(PLAYER);
   });
 
-  it('lets a bigger building out-claim a smaller one, whichever is nearer', () => {
+  it('gives every node to whoever pushes hardest on it, counting all his buildings', () => {
     const sim = contested();
     const theirs = sim.buildings.require(sim.players[1]!.headquarters);
 
-    // A barracks of the player's just outside the hall's claim, manned.
-    const post = baseNear(sim, theirs.point, 2, 10, 12);
-    holdIt(sim, post);
+    // Two posts of the player's up against the rival's hall, so that plenty of
+    // ground is pushed at from both sides by more than one building.
+    const near = baseNear(sim, theirs.point, 3, 14, 16);
+    holdIt(sim, near);
+    const second = baseNear(sim, near.point, 3, 5, 7);
+    holdIt(sim, second);
 
-    // A hall outranks a barracks whatever their reach, so every point both
-    // cover is the hall's — even the ones nearer the barracks, which under the
-    // old nearest-wins rule it took by the hundred.
-    const nearerThePost = sim.world.grid
-      .pointsWithin(post.point, 8)
-      .filter(
-        (point) =>
-          sim.world.grid.distance(theirs.point, point) <= 9 &&
-          sim.world.grid.distance(post.point, point) > 2 &&
-          sim.world.grid.distance(post.point, point) <
-            sim.world.grid.distance(theirs.point, point),
-      );
-    expect(nearerThePost.length).toBeGreaterThan(0);
-    for (const point of nearerThePost) expect(sim.world.owner[point]).toBe(RIVAL);
+    /** What a building brings to bear on a node: its reach, less the walk. */
+    const reachOfBuilding = (building: Building): number => {
+      const behaviour = buildingInfo(building.type).behaviour;
+      if (behaviour.kind === 'headquarters') return HALL_REACH;
+      if (behaviour.kind !== 'military') return 0;
+      return garrisonStrength(building.garrison) > 0 ? behaviour.radius : 0;
+    };
 
-    // And the post is never pushed off its own doorstep by the hall next door.
-    expect(sim.world.owner[post.point]).toBe(PLAYER);
-    expect(sim.world.owner[post.flagPoint]).toBe(PLAYER);
+    // Only the ground the last redraw actually covered. Ownership is worked
+    // out where a building has just changed something, not over the whole map
+    // every time, so anything outside that area still reflects an older
+    // arrangement and says nothing about the rule.
+    let judged = 0;
+    for (const point of sim.world.grid.pointsWithin(second.point, 8)) {
+      const push = new Map<number, number>();
+      let gripped = false;
+
+      for (const building of sim.buildings.all()) {
+        const reach = reachOfBuilding(building);
+        if (reach <= 0) continue;
+        const away = sim.world.grid.distance(building.point, point);
+        if (away > reach) continue;
+        // A post's grip on its own doorstep is a different rule; so is the
+        // ring a large building keeps. Neither is under test here.
+        if (away <= Math.floor(reach / 4)) gripped = true;
+        if (away <= 1) gripped = true;
+        push.set(building.owner, (push.get(building.owner) ?? 0) + reach - away + 1);
+      }
+      if (gripped || push.size < 2) continue;
+
+      const ranked = [...push.entries()].sort((a, b) => b[1] - a[1]);
+      // A dead heat is settled by other rules, so only clear ones are judged.
+      if (ranked[0]![1] === ranked[1]![1]) continue;
+
+      const winner = ranked[0]![0];
+      // And the edge sweep is a rule of its own: a node with fewer than three
+      // neighbours of its owner is not really held, whatever pushed hardest.
+      const kin = sim.world.grid
+        .pointsWithin(point, 1)
+        .filter((near) => near !== point && sim.world.owner[near] === winner).length;
+      if (kin < 3) continue;
+
+      expect(sim.world.owner[point]).toBe(winner);
+      judged += 1;
+    }
+
+    // Genuinely contested ground, not an empty loop dressed as a test.
+    expect(judged).toBeGreaterThan(20);
   });
 
-  it('lets a watchtower out-reach a barracks, and not the other way about', () => {
+  it('lets two buildings pushing together out-hold one that beats either alone', () => {
+    const sim = contested();
+    const theirs = sim.buildings.require(sim.players[1]!.headquarters);
+
+    // One post of the player's against the rival's hall, and a second beside
+    // it left empty for now: an unmanned post holds nothing and pushes nothing.
+    const near = baseNear(sim, theirs.point, 3, 14, 16);
+    holdIt(sim, near);
+    // A watchtower for the second: it reaches eleven, so the two of them
+    // together bring enough to bear that there is ground the difference tells
+    // on. A second barracks changes too little to measure against a hall.
+    const second = baseNear(sim, near.point, 0, 5, 7, BuildingType.WatchTower);
+
+    /** What everybody manned brings to bear on a node, by player. */
+    const pushOn = (point: number, counting: Building | undefined): Map<number, number> => {
+      const push = new Map<number, number>();
+      for (const building of sim.buildings.all()) {
+        const behaviour = buildingInfo(building.type).behaviour;
+        const reach =
+          behaviour.kind === 'headquarters'
+            ? HALL_REACH
+            : behaviour.kind === 'military' &&
+                (building === counting || garrisonStrength(building.garrison) > 0)
+              ? behaviour.radius
+              : 0;
+        if (reach <= 0) continue;
+        const away = sim.world.grid.distance(building.point, point);
+        if (away > reach) continue;
+        push.set(building.owner, (push.get(building.owner) ?? 0) + reach - away + 1);
+      }
+      return push;
+    };
+
+    // The nodes the rule says should turn: the rival out-pushes one post of
+    // his, and does not out-push the two of them together.
+    const willTurn = sim.world.grid.pointsWithin(second.point, 11).filter((point) => {
+      if (sim.world.grid.distance(near.point, point) <= 2) return false;
+      if (sim.world.grid.distance(second.point, point) <= 2) return false;
+      const alone = pushOn(point, undefined);
+      const together = pushOn(point, second);
+      const his = alone.get(RIVAL) ?? 0;
+      return his > (alone.get(PLAYER) ?? 0) && his < (together.get(PLAYER) ?? 0);
+    });
+    expect(willTurn.length).toBeGreaterThan(0);
+
+    // Manned, the second post pushes too, and every one of those nodes comes
+    // over. What the map said beforehand is not asserted: ownership is worked
+    // out where a building has changed something, so ground nobody has touched
+    // yet still reflects an older arrangement.
+    second.garrison[Rank.Private] = 3;
+    holdIt(sim, second);
+    for (const point of willTurn) expect(sim.world.owner[point]).toBe(PLAYER);
+  });
+
+  it('never lets anybody step on or off a door except by its flag', () => {
     const sim = contested();
     const target = outpostsOf(sim, RIVAL)[0]!;
+    const post = baseNear(sim, target.point, 8);
 
-    // A watchtower reaches eleven where a barracks reaches eight. Everything
-    // the rival's barracks covers that the tower covers too is the tower's,
-    // whichever of them is nearer.
-    const tower = baseNear(sim, target.point, 3, 5, 9, BuildingType.WatchTower);
-    holdIt(sim, tower);
+    // A whole game's worth of coming and going: workers out to the trees,
+    // carriers into stores, soldiers to a fight, a garrison turned out of a
+    // building pulled down under it.
+    expect(sim.attack(PLAYER, target.point, 7).ok).toBe(true);
 
-    // Ground the two posts contest between themselves: the rival's hall
-    // outranks both, so anything it covers is a different rule's business.
-    const theirs = sim.buildings.require(sim.players[1]!.headquarters);
-    const contestedGround = sim.world.grid
-      .pointsWithin(target.point, 8)
-      .filter(
-        (point) =>
-          sim.world.grid.distance(theirs.point, point) > 9 &&
-          sim.world.grid.distance(tower.point, point) <= 11 &&
-          sim.world.grid.distance(tower.point, point) > 2 &&
-          sim.world.grid.distance(target.point, point) > 2,
-      );
-    expect(contestedGround.length).toBeGreaterThan(0);
-    for (const point of contestedGround) expect(sim.world.owner[point]).toBe(PLAYER);
+    let throughAWall = 0;
+    for (let i = 0; i < 1200; i += 1) {
+      sim.update();
+      if (i === 600) sim.demolishBuilding(PLAYER, post.point);
 
-    // The barracks keeps its own doorstep all the same.
-    expect(sim.world.owner[target.point]).toBe(RIVAL);
+      // Rebuilt every tick, never added to: a site whose building has been
+      // pulled down is open ground, and walking over it is no offence.
+      const doors = new Map<number, number>();
+      sim.buildings.forEach((building) => doors.set(building.point, building.flagPoint));
+
+      for (const settler of sim.settlers.all()) {
+        if (settler.fromPoint === settler.toPoint) continue;
+        const out = doors.get(settler.fromPoint);
+        if (out !== undefined && settler.toPoint !== out) throughAWall += 1;
+        const into = doors.get(settler.toPoint);
+        if (into !== undefined && settler.fromPoint !== into) throughAWall += 1;
+      }
+    }
+
+    expect(throughAWall).toBe(0);
+  });
+
+  it('turns a demolished garrison out onto nodes of its own', () => {
+    const sim = contested();
+    const target = outpostsOf(sim, RIVAL)[0]!;
+    const post = baseNear(sim, target.point, 4);
+    holdIt(sim, post);
+    expect(garrisonStrength(post.garrison)).toBeGreaterThan(2);
+
+    const before = sim.settlers.all().length;
+    expect(sim.demolishBuilding(PLAYER, post.point).ok).toBe(true);
+
+    // Everybody who was inside is on the map, and countable: a man to a node,
+    // so four men read as four men rather than as one.
+    const turnedOut = sim.settlers.all().slice(before);
+    expect(turnedOut.length).toBeGreaterThan(2);
+    expect(new Set(turnedOut.map((settler) => settler.point)).size).toBe(turnedOut.length);
+    for (const settler of turnedOut) {
+      expect(settler.point).not.toBe(post.point);
+      expect(sim.world.grid.distance(settler.point, post.point)).toBe(1);
+    }
+  });
+
+  it('lets a man with nowhere to go wander, and then lose him', () => {
+    const sim = contested();
+    const hall = sim.buildings.require(sim.players[0]!.headquarters);
+
+    // A soldier of the player's, and not a store of his own left anywhere.
+    const stray = sim.settlers.add(
+      (id) =>
+        ({
+          id,
+          owner: PLAYER,
+          profession: Profession.Soldier,
+          rank: Rank.Private,
+          state: SettlerState.Idle,
+          point: hall.flagPoint,
+          fromPoint: hall.flagPoint,
+          toPoint: hall.flagPoint,
+          path: [],
+          pathIndex: 0,
+          stepProgress: 0,
+          stepLength: 8,
+        }) as unknown as Settler,
+    );
+    reachIn(sim).destroyBuilding(hall);
+
+    reachIn(sim).sendHome(stray);
+    expect(stray.state).toBe(SettlerState.Lost);
+
+    // He walks about rather than blinking out where he stood...
+    const seen = new Set<number>();
+    for (let i = 0; i < 120 && sim.settlers.get(stray.id); i += 1) {
+      sim.update();
+      seen.add(stray.point);
+    }
+    expect(seen.size).toBeGreaterThan(1);
+
+    // ...and then he is gone.
+    run(sim, 300);
+    expect(sim.settlers.get(stray.id)).toBeUndefined();
+  });
+
+  it('leaves no flag standing where a flag could not be put', () => {
+    const sim = contested();
+    const home = sim.buildings.require(sim.players[0]!.headquarters);
+    const post = baseBeyond(sim, home.point, 3);
+
+    // Flags out at the very edge of what the hall holds. While the post stands
+    // beyond them they are well inside a continuous province; once it comes
+    // down the border falls back onto them, and a flag may not stand on a
+    // border node — which is the watchtower case from the save.
+    const edge: number[] = [];
+    for (const point of sim.world.grid.pointsWithin(home.point, HALL_REACH)) {
+      if (sim.world.grid.distance(home.point, point) < HALL_REACH - 1) continue;
+      if (!canPlaceFlag(sim.world, point, PLAYER)) continue;
+      if (sim.placeFlag(PLAYER, point).ok) edge.push(point);
+    }
+    expect(edge.length).toBeGreaterThan(0);
+    for (const point of edge) expect(sim.world.flag[point]).not.toBe(0);
+
+    expect(sim.demolishBuilding(PLAYER, post.point).ok).toBe(true);
+
+    // Every one of them that now sits on the line has gone, and none of them
+    // has taken ground with it: they were the player's before and are still.
+    let onTheLine = 0;
+    for (const point of edge) {
+      if (isWellInsideTerritory(sim.world, point, PLAYER)) continue;
+      onTheLine += 1;
+      expect(sim.world.flag[point]).toBe(0);
+    }
+    expect(onTheLine).toBeGreaterThan(0);
+
+    // And nothing anywhere is left where the rules would not have allowed it.
+    for (const flag of sim.flags.all()) {
+      if (flag.building !== 0) continue;
+      expect(isWellInsideTerritory(sim.world, flag.point, flag.owner)).toBe(true);
+    }
+    for (const road of sim.roads.all()) {
+      for (const point of road.points) expect(sim.world.owner[point]).toBe(road.owner);
+    }
+  });
+
+  it('keeps a clear node around a large building before the border starts', () => {
+    const sim = contested();
+    const home = sim.buildings.require(sim.players[0]!.headquarters);
+
+    // A farm is large, and unlike a fortress it has no garrison and so no grip
+    // of its own. Out at the edge of the hall's claim, where the border would
+    // otherwise run against its wall.
+    let farm: Building | undefined;
+    for (const point of [...sim.world.grid.pointsWithin(home.point, HALL_REACH)].reverse()) {
+      const space = evaluateBuildSpace(sim.world, point, PLAYER);
+      if (space === BuildSpace.None || !canHostSize(space, BuildingSize.Castle)) continue;
+      farm = reachIn(sim).createBuilding(BuildingType.Farm, point, PLAYER);
+      if (farm) break;
+    }
+    expect(farm).toBeDefined();
+    farm!.state = BuildingState.Complete;
+
+    // Take the ground around it away, then work the border out again.
+    for (const point of sim.world.grid.pointsWithin(farm!.point, 1)) {
+      if (point === farm!.point) continue;
+      sim.world.owner[point] = 0;
+    }
+    const post = baseNear(sim, home.point, 3, 6, 9);
+    holdIt(sim, post);
+
+    // Its own node, its flag, and the whole ring about it are the player's.
+    expect(sim.world.owner[farm!.point]).toBe(PLAYER);
+    expect(sim.world.owner[farm!.flagPoint]).toBe(PLAYER);
+    for (const point of sim.world.grid.pointsWithin(farm!.point, 1)) {
+      expect(sim.world.owner[point]).toBe(PLAYER);
+    }
+  });
+
+  it('keeps a post five nodes clear of a headquarters', () => {
+    const sim = contested();
+    const hall = sim.buildings.require(sim.players[0]!.headquarters);
+
+    for (const point of sim.world.grid.pointsWithin(hall.point, 4)) {
+      // Its own node answers about everything *else* nearby, and there is
+      // nothing else; a building stands there anyway.
+      if (point === hall.point) continue;
+      expect(canPlaceOutpost(sim.world, point, PLAYER)).toBe(false);
+    }
+
+    // And five out it is only the ordinary rules that can refuse him.
+    const clear = sim.world.grid
+      .pointsWithin(hall.point, 6)
+      .filter((point) => sim.world.grid.distance(hall.point, point) >= 5);
+    expect(clear.some((point) => canPlaceOutpost(sim.world, point, PLAYER))).toBe(true);
   });
 
   it('leaves no single dots hanging off a border', () => {
@@ -5196,18 +5531,14 @@ describe('a war', () => {
   it('clears what falls outside the border when a post comes down', () => {
     const sim = contested();
     const home = sim.buildings.require(sim.players[0]!.headquarters);
-    const post = baseNear(sim, home.point, 3, 11, 15);
+    const post = baseBeyond(sim, home.point, 3);
 
     // A hut and a flag of the player's out beyond the hall, standing on ground
     // only this post holds.
     const outside = (point: number): boolean =>
-      sim.world.grid.distance(home.point, point) > 9 &&
-      sim.world.grid.distance(post.point, point) <= 8;
-    const hut = hutOn(
-      sim,
-      PLAYER,
-      sim.world.grid.pointsWithin(post.point, 8).filter(outside),
-    );
+      sim.world.grid.distance(home.point, point) > HALL_REACH &&
+      sim.world.grid.distance(post.point, point) <= 6;
+    const hut = hutOn(sim, PLAYER, sim.world.grid.pointsWithin(post.point, 6).filter(outside));
     const flagPoint = sim.world.grid
       .pointsWithin(post.point, 7)
       .find((point) => outside(point) && canPlaceFlag(sim.world, point, PLAYER));
@@ -5348,14 +5679,13 @@ describe('a war', () => {
   it('tears a road that has been left running over ground its owner lost', () => {
     const sim = contested();
     const home = sim.buildings.require(sim.players[0]!.headquarters);
-    const post = baseNear(sim, home.point, 3, 11, 15);
-    holdIt(sim, post);
+    const post = baseBeyond(sim, home.point, 3);
 
     // A road of the player's whose two flags stand on ground the hall holds,
     // but whose middle only the post holds. Both flags survive the post coming
     // down, so nothing else can take this road with it — only the sweep can.
     const onlyThePost = (point: number): boolean =>
-      sim.world.owner[point] === PLAYER && sim.world.grid.distance(home.point, point) > 9;
+      sim.world.owner[point] === PLAYER && sim.world.grid.distance(home.point, point) > HALL_REACH;
 
     let laid: number[] | undefined;
     for (const middle of sim.world.grid.pointsWithin(post.point, 6)) {
@@ -5368,7 +5698,7 @@ describe('a war', () => {
         for (const end of sim.world.grid.pointsWithin(step, 1)) {
           if (end === step || end === middle) continue;
           if (sim.world.grid.distance(middle, end) !== 2) continue;
-          if (sim.world.grid.distance(home.point, end) > 9) continue;
+          if (sim.world.grid.distance(home.point, end) > HALL_REACH) continue;
           if (sim.world.owner[end] !== PLAYER) continue;
           if (!canPlaceFlag(sim.world, end, PLAYER)) continue;
           legs.push([end, step]);
@@ -5400,12 +5730,15 @@ describe('a war', () => {
 
     expect(sim.demolishBuilding(PLAYER, post.point).ok).toBe(true);
 
-    // The middle has gone back to nobody, so the road over it goes too — even
-    // though both its flags are still standing on the hall's own ground.
+    // The middle has gone back to nobody, so the road over it goes too.
     expect(sim.world.owner[laid![2]!]).toBe(0);
-    expect(sim.world.owner[laid![0]!]).toBe(PLAYER);
-    expect(sim.world.flag[laid![0]!]).not.toBe(0);
     expect(sim.roads.get(road!.id)).toBeUndefined();
+
+    // And nothing anywhere is left running over ground its owner has lost —
+    // the invariant the sweep exists for, whichever way a given road goes.
+    for (const other of sim.roads.all()) {
+      for (const point of other.points) expect(sim.world.owner[point]).toBe(other.owner);
+    }
   });
 
   it('carries the men waiting to walk in through a save', () => {

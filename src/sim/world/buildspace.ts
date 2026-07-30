@@ -78,7 +78,7 @@ function isPointClear(world: World, point: number): boolean {
 }
 
 /** True when the point itself and all six neighbours belong to `player`. */
-function isWellInsideTerritory(world: World, point: number, player: number): boolean {
+export function isWellInsideTerritory(world: World, point: number, player: number): boolean {
   if (world.owner[point] !== player) return false;
   for (const direction of DIRECTIONS) {
     const neighbour = world.grid.neighbour(point, direction);
@@ -370,9 +370,9 @@ export const OUTPOST_SPACING = 4;
 /**
  * Whether a military building may go here, on top of the ordinary space rules.
  *
- * Only the player's own outposts hold him back. The headquarters is not one —
- * its behaviour is `headquarters`, not `military` — so it neither blocks nor is
- * blocked.
+ * Only the player's own posts hold him back, and his headquarters is one of
+ * them: it holds ground as a fortress does, so a post crowded against its wall
+ * is a post whose whole reach the hall was covering anyway.
  */
 export function canPlaceOutpost(world: World, point: number, player: number): boolean {
   for (const other of world.grid.pointsWithin(point, OUTPOST_SPACING)) {
