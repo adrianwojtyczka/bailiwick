@@ -121,11 +121,15 @@ export interface Building {
    */
   defenderDelay: number;
   /**
-   * The tick this building's garrison first held a man, which settles a border
-   * that two sides push on exactly as hard: the one manned longest keeps it.
-   * Nought for anything that has never been manned, and in saves older than
-   * version 9 — which reads as "since the beginning", right for a post that has
-   * been standing however long the save has been going.
+   * The tick this building became its owner's — the first time a man stood in
+   * it, or the moment it was taken from somebody else. It settles a border that
+   * two sides push on exactly as hard: the one held longest keeps it.
+   *
+   * A post emptied in a fight and filled again keeps its date; it is the same
+   * post, still its owner's. Nought for anything that has never been manned,
+   * for a headquarters, which has been its owner's since the beginning, and in
+   * saves older than version 9 — which reads the same way, right for a post
+   * that has been standing however long the save has been going.
    */
   mannedAt: number;
 }

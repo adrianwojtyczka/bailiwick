@@ -78,10 +78,20 @@ const RIVAL_OUTPOST_RANGE = 12;
 const RIVAL_OUTPOST_REACH = 9;
 
 /**
- * What share of a building's radius it takes from a neighbour who already holds
- * it, as a divisor: a quarter.
+ * The ground a building is guaranteed whatever anybody else brings to bear, by
+ * size: a large one — a hall or a fortress — keeps two rings, everything else
+ * one.
+ *
+ * Two rings is what puts a border out of reach of a hall's wall: with the first
+ * ring inside its own ground on every side, no border line can run there, and
+ * the line starts at the second ring at the nearest. A hut or a house has no
+ * such claim on the view from its door, so a barracks may stand with the
+ * frontier drawn directly around it.
+ *
+ * Everything past the ring is a question of pressure and nothing else.
  */
-const TERRITORY_BITE = 4;
+const LARGE_KEEP = 2;
+const KEEP = 1;
 
 /**
  * How many of its six neighbours a point needs to count as really held, and the
@@ -472,10 +482,14 @@ export type CommandResult = { readonly ok: true } | { readonly ok: false; readon
 
 /** A building holding ground, for `redrawTerritory` to work a border out from. */
 interface Claimant {
+  readonly building: number;
   readonly point: number;
   readonly radius: number;
-  readonly bite: number;
-  /** The tick its garrison first held a man, for settling a dead heat. */
+  /**
+   * The tick it became its owner's, for settling a dead heat: the side who has
+   * held a place longest keeps it. Nought for a headquarters, which has been
+   * its owner's since the beginning in every case.
+   */
   readonly mannedAt: number;
   readonly player: number;
 }
@@ -1300,6 +1314,11 @@ export class Simulation {
     target.garrison.fill(0);
     target.garrisonRequested = 0;
     target.defenderDelay = 0;
+    // A post is as old as the day it became yours. Whatever it had stood
+    // through for the man who built it counts for him and not for the man who
+    // has just walked in, so a border it is now pushing on cannot be won by an
+    // age it earned on the other side.
+    target.mannedAt = this.tick;
     // Empty, and holding nothing until somebody is inside it — exactly a
     // newly built post. The ground goes over when the first man is in, which
     // is why there is no redraw here.
@@ -2228,15 +2247,6 @@ export class Simulation {
   }
 
   /**
-   * Ground a newly manned outpost takes for its owner.
-   *
-   * Open ground within the whole radius, and a neighbour's ground within a
-   * quarter of it — near enough the walls that his men could not hold it with
-   * this post looking down on them. So a border moves by building towards it,
-   * and moves further for a bigger building: two nodes for a barracks, three
-   * for a fortress.
-   */
-  /**
    * Works out afresh who holds every point in an area.
    *
    * The one place ownership is ever decided. It used to be patched — laid down
@@ -2246,18 +2256,18 @@ export class Simulation {
    * that actually hold it, so what a player owns is always exactly what his
    * buildings can cover.
    *
-   * Of the claimants covering a point, the strongest holds it:
+   * Three passes, in this order:
    *
-   *  1. one within its own bite — a quarter of its radius — beats anything,
-   *     which is what keeps a post standing on ground of its own however big
-   *     the building glowering at it from across the border;
-   *  2. then rank: a headquarters beats every outpost, and otherwise the longer
-   *     reach wins, so a barracks never out-claims a hall;
-   *  3. then the nearer;
-   *  4. then whoever holds it already, so a border does not shuffle about when
-   *     nothing has really changed;
-   *  5. then the lower player id, so the answer never depends on the order
-   *     buildings happen to sit in.
+   *  1. **pressure.** Every building covering a point pushes with
+   *     `radius − distance + 1`, and the player whose buildings push hardest in
+   *     total holds it. Counting them together is what lets two buildings
+   *     either side of a node out-hold the one bigger building facing them —
+   *     and what stops a single captured post out-holding a hall and the two
+   *     posts standing with it.
+   *  2. **the edges**, rubbing off the single dots a hexagon's corners leave.
+   *  3. **the keeps**: each claimant takes back the ring it is guaranteed by
+   *     size, and every building the node under it and its flag. Last of the
+   *     three, so nothing undoes them.
    *
    * Called when ground can have changed hands — a post manned, a building
    * destroyed, a building captured — and never on the ordinary beat: a fortress
@@ -2273,15 +2283,8 @@ export class Simulation {
 
     const claimants: Claimant[] = [];
     this.buildings.forEach((building) => {
-      const reach = this.claimRadiusOf(building, holding.has(building.id));
-      if (reach <= 0) return;
-      claimants.push({
-        point: building.point,
-        radius: reach,
-        bite: Math.floor(reach / TERRITORY_BITE),
-        mannedAt: building.mannedAt,
-        player: building.owner,
-      });
+      const claim = this.claimOf(building, holding.has(building.id));
+      if (claim) claimants.push(claim);
     });
 
     const area = this.world.grid.pointsWithin(centre, radius);
@@ -2293,7 +2296,13 @@ export class Simulation {
       this.world.owner[point] = this.strongestClaimTo(point, claimants, held);
     }
 
-    this.keepBuildingsTheirGround(before);
+    // Whether a building held its own ground read here, off the scoring, and
+    // not after the sweep: the scoring is where a border genuinely moving shows
+    // up, and it is a genuine move that costs a building its site.
+    const standing = new Set<number>();
+    this.buildings.forEach((building) => {
+      if (this.world.owner[building.point] === building.owner) standing.add(building.id);
+    });
 
     // The whole map, not merely what was redrawn: a point just outside the
     // area can be left standing alone by what happened inside it, and trimming
@@ -2305,6 +2314,10 @@ export class Simulation {
       // can move ground anywhere on the map rather than only inside the area.
       if (!before.has(point)) before.set(point, held);
     }
+
+    // Last, so that nothing — neither the scoring nor the sweep — can take from
+    // a building the ring it is guaranteed.
+    this.keepBuildingsTheirGround(before, claimants, standing);
 
     const overrun: Overrun[] = [];
     for (const [point, held] of before) {
@@ -2324,15 +2337,38 @@ export class Simulation {
     this.surveyFrontier();
   }
 
-  /** Who holds a point, of the buildings covering it. */
+  /** What a building brings to a border, or nothing for one that holds none. */
+  private claimOf(building: Building, defended: boolean): Claimant | undefined {
+    const reach = this.claimRadiusOf(building, defended);
+    if (reach <= 0) return undefined;
+
+    return {
+      building: building.id,
+      point: building.point,
+      radius: reach,
+      // A hall has been its owner's since the beginning, in every case. It is
+      // not manned by a garrison walking in through the door, so nothing would
+      // ever have dated it — and it is the one building on the map that was
+      // there before anything else was.
+      mannedAt:
+        buildingInfo(building.type).behaviour.kind === 'headquarters' ? 0 : building.mannedAt,
+      player: building.owner,
+    };
+  }
+
+  /**
+   * Who holds a point, of the buildings covering it: whoever pushes hardest on
+   * it, counting everything he has within reach of it.
+   *
+   * Nothing here is guaranteed to anybody. What a building keeps whatever the
+   * pressure — the ring it stands in — is `keepBuildingsTheirGround`, and it
+   * runs after this and after the edge sweep.
+   */
   private strongestClaimTo(
     point: number,
     claimants: readonly Claimant[],
     incumbent: number,
   ): number {
-    let gripped = 0;
-    let grippedFrom = Number.POSITIVE_INFINITY;
-
     // Pressure by player. Sparse and tiny — two or three players at most — so a
     // plain array beats a map, and the loop below runs on every point of a
     // redrawn area.
@@ -2343,23 +2379,11 @@ export class Simulation {
       const distance = this.world.grid.distance(claim.point, point);
       if (distance > claim.radius) continue;
 
-      // A grip beats everything: within a quarter of its own radius a post
-      // holds its ground however hard the buildings opposite are pushing, and
-      // that is what leaves a captured post standing on ground of its own.
-      if (distance <= claim.bite && distance < grippedFrom) {
-        gripped = claim.player;
-        grippedFrom = distance;
-      } else if (distance <= claim.bite && distance === grippedFrom && claim.player < gripped) {
-        gripped = claim.player;
-      }
-
       pushed[claim.player] = (pushed[claim.player] ?? 0) + claim.radius - distance + 1;
       // The earliest manning on each side, for a dead heat.
       const since = manned[claim.player];
       if (since === undefined || claim.mannedAt < since) manned[claim.player] = claim.mannedAt;
     }
-
-    if (gripped !== 0) return gripped;
 
     let holder = 0;
     let hardest = 0;
@@ -2387,17 +2411,38 @@ export class Simulation {
   }
 
   /**
-   * Every building keeps the ground under it, and a large one the ring about it.
+   * The ground every building keeps whatever the pressure around it: the node
+   * under it, its flag, and a ring by what it is.
    *
    * A border works out from where buildings are, so it should never be worked
-   * out *through* one. The small sizes may have a line running around them —
-   * that is the ordinary frontier hut — but a hall or a fortress wants a clear
-   * node before the border starts, or the line cuts in against its wall.
+   * out *through* one. How much room that takes goes by size and by whether the
+   * building holds ground at all:
+   *
+   * - a **large** building — a hall, a fortress, a farm — keeps `LARGE_KEEP`
+   *   rings, so its whole first ring is well inside its own ground and no
+   *   border line can run against its wall;
+   * - anything **holding ground** keeps at least `KEEP`, so a post is never
+   *   razed by the very border it has just redrawn: pressure alone hands the
+   *   ground under a captured post to whoever pushes hardest there, and 4 nodes
+   *   from an enemy hall that is the hall. One ring is also the least that
+   *   survives the edge sweep, every node of it having three of its own.
+   * - everything else keeps its node and its flag, and only while it still held
+   *   them when the scoring was done. A hut on ground its owner has genuinely
+   *   lost is a hut about to come down with it, and handing the node back would
+   *   save it from a border it has no business surviving.
+   *
+   * Rings can overlap only where a post stands almost against an enemy hall.
+   * The bigger keep wins, then the older claim, then the lower id, so the
+   * answer never depends on the order buildings sit in.
    *
    * `before` is added to for anything this takes, so the ground still counts as
    * having changed hands and whoever lost it is cleared off it.
    */
-  private keepBuildingsTheirGround(before: Map<number, number>): void {
+  private keepBuildingsTheirGround(
+    before: Map<number, number>,
+    claimants: readonly Claimant[],
+    standing: ReadonlySet<number>,
+  ): void {
     const keep = (point: number, owner: number): void => {
       const held = this.world.owner[point]!;
       if (held === owner) return;
@@ -2405,21 +2450,32 @@ export class Simulation {
       this.world.owner[point] = owner;
     };
 
+    const holdsGround = new Map<number, Claimant>();
+    for (const claim of claimants) holdsGround.set(claim.building, claim);
+
+    const kept: { point: number; flagPoint: number; keep: number; owner: number; since: number }[] =
+      [];
     this.buildings.forEach((building) => {
-      // Only a building that still holds the ground under it. One whose own
-      // site has just gone is a building on lost ground and about to come down
-      // with it; handing the node back would save it from a border it has no
-      // business surviving. A hall or a fortress never falls into this — its
-      // grip on its own doorstep is three nodes.
-      if (this.world.owner[building.point] !== building.owner) return;
+      const claim = holdsGround.get(building.id);
+      if (!claim && !standing.has(building.id)) return;
 
-      keep(building.flagPoint, building.owner);
-
-      if (buildingInfo(building.type).size !== BuildingSize.Castle) return;
-      for (const near of this.world.grid.pointsWithin(building.point, 1)) {
-        keep(near, building.owner);
-      }
+      const large = buildingInfo(building.type).size === BuildingSize.Castle;
+      kept.push({
+        point: building.point,
+        flagPoint: building.flagPoint,
+        keep: large ? LARGE_KEEP : claim ? KEEP : 0,
+        owner: building.owner,
+        since: claim?.mannedAt ?? building.mannedAt,
+      });
     });
+
+    kept.sort((a, b) => a.keep - b.keep || b.since - a.since || b.owner - a.owner);
+    for (const held of kept) {
+      for (const near of this.world.grid.pointsWithin(held.point, held.keep)) {
+        keep(near, held.owner);
+      }
+      keep(held.flagPoint, held.owner);
+    }
   }
 
   /**
@@ -2847,10 +2903,15 @@ export class Simulation {
     settler.taskTimer = WORKER_REST_TICKS;
 
     const building = this.buildings.get(settler.building);
-    if (building && settler.carrying !== null && building.output === null) {
-      building.output = settler.carrying;
+    if (building && settler.carrying !== null) {
+      // A store's porter comes back in with what was waiting on its doorstep,
+      // and it goes into the stock rather than back out as something the store
+      // has made.
+      if (isStore(building)) this.receiveWare(building, settler.carrying);
+      else if (building.output === null) building.output = settler.carrying;
     }
     settler.carrying = null;
+    settler.carryDestination = 0;
   }
 
   /**
@@ -3177,6 +3238,9 @@ export class Simulation {
   private setDownAtFlag(settler: Settler): void {
     const building = this.buildings.get(settler.building);
     if (settler.carrying === null) {
+      // Out for a crate rather than with one: he picks up whatever is waiting
+      // to go in, and carries it in himself. One trip, one crate.
+      if (building) this.takeUpAtFlag(settler, building);
       this.walkBackInside(settler, building);
       return;
     }
@@ -3210,6 +3274,28 @@ export class Simulation {
     if (building) building.status = BuildingStatus.Working;
 
     this.walkBackInside(settler, building);
+  }
+
+  /**
+   * Takes one crate waiting at a building's own flag into a porter's hands.
+   *
+   * Its place inside is already reserved — it has been bound for this building
+   * since it was routed — so `carryDestination` is set to match and nothing is
+   * counted twice.
+   */
+  private takeUpAtFlag(settler: Settler, building: Building): void {
+    if (settler.point !== building.flagPoint) return;
+
+    const flagId = this.world.flag[building.flagPoint];
+    const flag = flagId ? this.flags.get(flagId) : undefined;
+    if (!flag) return;
+
+    const index = flag.wares.findIndex((parcel) => this.isForThisDoor(building, parcel));
+    if (index < 0) return;
+
+    const parcel = flag.wares.splice(index, 1)[0]!;
+    settler.carrying = parcel.ware;
+    settler.carryDestination = building.id;
   }
 
   private walkBackInside(settler: Settler, building: Building | undefined): void {
@@ -4226,6 +4312,15 @@ export class Simulation {
     const flag = this.flags.get(flagId);
     if (!flag) return;
 
+    // A store has a man for this, and one door for him to use it by. Six crates
+    // re-homed to a hall used to cross its doorstep in a single tick with
+    // nobody touching them, which is a conjuring trick rather than a haulage
+    // network.
+    if (isStore(building)) {
+      this.fetchWaitingWares(building, flag);
+      return;
+    }
+
     for (let i = flag.wares.length - 1; i >= 0; i -= 1) {
       const parcel = flag.wares[i]!;
       if (parcel.destination !== building.id) continue;
@@ -4234,6 +4329,30 @@ export class Simulation {
       flag.wares.splice(i, 1);
       this.receiveWare(building, parcel.ware);
     }
+  }
+
+  /**
+   * Sends a store's porter out for one crate left standing on its own doorstep.
+   *
+   * The mirror of `pushStoredWares`, and it uses the same man and the same
+   * one-man doorway, so a store is never both fetching and dispatching at once.
+   * He goes out empty; `setDownAtFlag` puts the crate in his hands when he gets
+   * there and turns him round.
+   */
+  private fetchWaitingWares(building: Building, flag: Flag): void {
+    if (!flag.wares.some((parcel) => this.isForThisDoor(building, parcel))) return;
+
+    const porter = this.storePorter(building);
+    if (!porter) return;
+    if (!this.takeTheDoorway(building)) return;
+
+    porter.taskTimer = 0;
+    this.walkToOwnFlag(porter, building);
+  }
+
+  /** A crate standing at a building's own flag, waiting to be taken inside. */
+  private isForThisDoor(building: Building, parcel: WareParcel): boolean {
+    return parcel.destination === building.id && willAccept(building, parcel.ware);
   }
 
   /** Stores hand out wares that somebody has asked for. */
@@ -4917,7 +5036,10 @@ export class Simulation {
     this.settlers.remove(settler.id);
 
     if (held === 0) {
-      building.mannedAt = this.tick;
+      // The first man ever to stand in it, and only him: a post emptied in a
+      // fight and filled again is the same post, and keeps the age it has held
+      // its place for. A captured one is dated from the capture instead.
+      if (building.mannedAt === 0) building.mannedAt = this.tick;
       this.redrawTerritory(building.point, behaviour.radius);
       this.note(
         `${info.name} manned, claiming new ground.`,
@@ -4966,15 +5088,17 @@ export class Simulation {
     const ring = this.groundAround(building.point);
     let placed = 0;
 
-    // Where the next man out stands: round the ring, and back on the doorstep
+    // Where the next man out steps: round the ring, and back onto the doorstep
     // once it is full rather than holding anybody back.
     const standing = (): number => ring[placed] ?? building.point;
 
     const worker = building.worker ? this.settlers.get(building.worker) : undefined;
     if (worker) {
-      this.putHimAt(worker, standing());
+      const out = standing();
+      this.putHimAt(worker, out);
       placed += 1;
       this.dismissSettler(worker.id);
+      this.stepOutOnto(worker, building.point, out);
       this.holdBack(worker, placed);
     }
 
@@ -4983,13 +5107,32 @@ export class Simulation {
       building.garrison[rank] = 0;
 
       for (let i = 0; i < count; i += 1) {
-        const settler = this.createSettler(building.owner, Profession.Soldier, standing());
+        const out = standing();
+        const settler = this.createSettler(building.owner, Profession.Soldier, out);
         settler.rank = rank;
         placed += 1;
         this.sendHome(settler);
+        this.stepOutOnto(settler, building.point, out);
         this.holdBack(settler, placed);
       }
     }
+  }
+
+  /**
+   * Puts a man back on the doorstep he was routed from, with that first step
+   * out in front of him to walk.
+   *
+   * The route is worked out from the node he is to leave by, because that is
+   * where his journey really starts; but he must not *appear* there. Nobody in
+   * the game is ever moved without walking, and a man who blinks a node clear
+   * of a building coming down is the plainest possible breach of it.
+   */
+  private stepOutOnto(settler: Settler, door: number, out: number): void {
+    if (this.settlers.get(settler.id) !== settler) return; // Taken in already.
+    if (out === door) return;
+
+    settler.point = door;
+    this.setPath(settler, settler.path[0] === out ? settler.path : [out, ...settler.path]);
   }
 
   /** Open ground beside a point, in the lattice's own order. */

@@ -4137,6 +4137,84 @@ describe('the door of a store', () => {
     expect(worst).toBe(1);
   });
 
+  it('sends a porter out for what is waiting on its own doorstep, one crate at a time', () => {
+    const sim = newGame();
+    const hq = headquarters(sim);
+    const flag = sim.flags.require(sim.world.flag[hq.flagPoint]!);
+
+    // Six crates standing at the hall's own flag, bound for the hall — which is
+    // where a building site the player pulls down leaves its materials.
+    const CRATES = 6;
+    const before = sim.storedWare(PLAYER, Ware.Board);
+    for (let i = 0; i < CRATES; i += 1) {
+      flag.wares.push({ ware: Ware.Board, destination: hq.id });
+    }
+
+    // Nothing crosses the doorstep in a single tick, and nothing crosses it
+    // without a man carrying it.
+    let biggestJump = 0;
+    let held = sim.storedWare(PLAYER, Ware.Board);
+    let carried = 0;
+    for (let tick = 0; tick < 2000 && flag.wares.length > 0; tick += 1) {
+      sim.update();
+      const now = sim.storedWare(PLAYER, Ware.Board);
+      biggestJump = Math.max(biggestJump, now - held);
+      held = now;
+      carried = Math.max(
+        carried,
+        sim.settlers.all().filter((settler) => settler.carrying === Ware.Board).length,
+      );
+      expect(onTheStep(sim)).toBeLessThanOrEqual(1);
+    }
+
+    // The last of them is still in the porter's hands when the flag empties.
+    for (let tick = 0; tick < 60; tick += 1) {
+      sim.update();
+      const now = sim.storedWare(PLAYER, Ware.Board);
+      biggestJump = Math.max(biggestJump, now - held);
+      held = now;
+    }
+
+    expect(flag.wares.length).toBe(0);
+    expect(sim.storedWare(PLAYER, Ware.Board)).toBe(before + CRATES);
+    expect(biggestJump).toBe(1);
+    expect(carried).toBeGreaterThan(0);
+  });
+
+  it('makes the porter fetching a crate queue at the door like everybody else', () => {
+    const sim = newGame();
+    const hq = headquarters(sim);
+    const flag = sim.flags.require(sim.world.flag[hq.flagPoint]!);
+
+    // Crates waiting to come in, and buildings wanting men to go out: the two
+    // directions competing for one doorway.
+    for (const type of [
+      BuildingType.Woodcutter,
+      BuildingType.Forester,
+      BuildingType.Quarry,
+      BuildingType.Sawmill,
+    ]) {
+      buildAndConnect(sim, type, type === BuildingType.Woodcutter ? MapObject.Tree : null);
+    }
+
+    let worst = 0;
+    let sawSomebody = false;
+    for (let i = 0; i < 3000; i += 1) {
+      // Kept topped up, so the hall is fetching for the whole run rather than
+      // for the first few seconds of it.
+      if (flag.wares.length < FLAG_CAPACITY) {
+        flag.wares.push({ ware: Ware.Board, destination: hq.id });
+      }
+      sim.update();
+      const step = onTheStep(sim);
+      if (step > 0) sawSomebody = true;
+      worst = Math.max(worst, step);
+    }
+
+    expect(sawSomebody).toBe(true);
+    expect(worst).toBe(1);
+  });
+
   it('is not held by a man walking back in', () => {
     const sim = newGame();
     const hq = headquarters(sim);
@@ -4461,6 +4539,14 @@ describe('a war', () => {
    * ranks. Reaching in beats widening the game's own surface with methods that
    * exist for nobody but the tests.
    */
+  interface Claim {
+    readonly building: number;
+    readonly point: number;
+    readonly radius: number;
+    readonly mannedAt: number;
+    readonly player: number;
+  }
+
   interface Innards {
     createBuilding(type: BuildingType, point: number, owner: number): Building | undefined;
     exchangeBlows(target: Building, attacker: Settler, defender: Settler): void;
@@ -4468,6 +4554,8 @@ describe('a war', () => {
     pathOutOf(building: Building, to: number): number[] | undefined;
     destroyBuilding(building: Building): void;
     sendHome(settler: Settler): void;
+    claimOf(building: Building, defended: boolean): Claim | undefined;
+    strongestClaimTo(point: number, claimants: readonly Claim[], incumbent: number): number;
   }
 
   /** Every state a soldier passes through between the order and the outcome. */
@@ -4956,22 +5044,22 @@ describe('a war', () => {
     expect(sim.world.owner[alsoSecond!]).toBe(PLAYER);
   });
 
-  it('moves the border by a quarter of the radius when a post is manned', () => {
+  it('keeps a manned post its first ring, and settles the rest on pressure', () => {
     const sim = contested();
     const theirs = sim.buildings.require(sim.players[1]!.headquarters);
 
-    // A post of the player's just outside their claim, then manned. Only the
-    // ground the *hall* holds is under test: against a post of his own rank a
-    // barracks wins on nearness as it always did, and that is a different rule.
-    const post = baseNear(sim, theirs.point, 0, 14, 16);
+    // A post of the player's hard up against the rival's hall — inside its
+    // reach, where the hall out-pushes a barracks on every node either of them
+    // covers. Nothing but the post's own ring should be the player's.
+    const post = baseNear(sim, theirs.point, 0, 5, 7);
     const away = (point: number): number => sim.world.grid.distance(post.point, point);
     // By distance, not by who holds them at this moment: `baseNear` paints
     // ownership onto every site it tries before settling on one, so what the
     // map says here is partly the harness's own doing.
-    const his = sim.world.grid
+    const covered = sim.world.grid
       .pointsWithin(post.point, 8)
       .filter((point) => sim.world.grid.distance(theirs.point, point) <= HALL_REACH);
-    expect(his.length).toBeGreaterThan(0);
+    expect(covered.length).toBeGreaterThan(0);
 
     const soldier = sim.settlers.add(
       (id) =>
@@ -4986,19 +5074,23 @@ describe('a war', () => {
     );
     reachIn(sim).joinGarrison(soldier);
 
-    // A barracks covers eight, so its grip is two nodes: everything that near
-    // is his whatever the hall brings to bear, which is what the grip is for.
-    const gripped = his.filter((point) => away(point) <= 2);
-    expect(gripped.length).toBeGreaterThan(0);
-    for (const point of gripped) expect(sim.world.owner[point]).toBe(PLAYER);
+    // The ring it keeps whatever is pushing at it, which is what stops a post
+    // being razed by the border it has just redrawn.
+    const ring = covered.filter((point) => away(point) <= 1);
+    expect(ring.length).toBeGreaterThan(0);
+    for (const point of ring) expect(sim.world.owner[point]).toBe(PLAYER);
 
-    // Past the grip it is a question of pressure, and a hall pushing with a
-    // fortress's reach still holds ground deep inside its own claim.
-    const deep = his.filter(
-      (point) => away(point) > 2 && sim.world.grid.distance(theirs.point, point) <= 9,
-    );
-    expect(deep.length).toBeGreaterThan(0);
-    for (const point of deep) expect(sim.world.owner[point]).toBe(RIVAL);
+    // And past it, pressure and nothing else. A hall reaching thirteen brings
+    // more to bear than a barracks reaching eight on every node it covers this
+    // near, so the ground stays the rival's — where the old grip handed the
+    // player a quarter of the barracks's radius outright.
+    const beyond = covered.filter((point) => {
+      if (away(point) <= 1) return false;
+      if (sim.world.grid.distance(theirs.point, point) <= 2) return false; // the hall's own ring
+      return HALL_REACH - sim.world.grid.distance(theirs.point, point) > 8 - away(point);
+    });
+    expect(beyond.length).toBeGreaterThan(10);
+    for (const point of beyond) expect(sim.world.owner[point]).toBe(RIVAL);
   });
 
   it('offers all its spare men close by, and fewer further out', () => {
@@ -5221,20 +5313,22 @@ describe('a war', () => {
     let judged = 0;
     for (const point of sim.world.grid.pointsWithin(second.point, 8)) {
       const push = new Map<number, number>();
-      let gripped = false;
+      let kept = false;
 
       for (const building of sim.buildings.all()) {
         const reach = reachOfBuilding(building);
         if (reach <= 0) continue;
         const away = sim.world.grid.distance(building.point, point);
         if (away > reach) continue;
-        // A post's grip on its own doorstep is a different rule; so is the
-        // ring a large building keeps. Neither is under test here.
-        if (away <= Math.floor(reach / 4)) gripped = true;
-        if (away <= 1) gripped = true;
+        // The ring a building keeps whatever the pressure is a rule of its
+        // own — two nodes for a hall or a fortress, one for the rest — and is
+        // not under test here.
+        if (away <= (buildingInfo(building.type).size === BuildingSize.Castle ? 2 : 1)) {
+          kept = true;
+        }
         push.set(building.owner, (push.get(building.owner) ?? 0) + reach - away + 1);
       }
-      if (gripped || push.size < 2) continue;
+      if (kept || push.size < 2) continue;
 
       const ranked = [...push.entries()].sort((a, b) => b[1] - a[1]);
       // A dead heat is settled by other rules, so only clear ones are judged.
@@ -5353,14 +5447,22 @@ describe('a war', () => {
     expect(sim.demolishBuilding(PLAYER, post.point).ok).toBe(true);
 
     // Everybody who was inside is on the map, and countable: a man to a node,
-    // so four men read as four men rather than as one.
+    // so four men read as four men rather than as one. They are *walking* to
+    // those nodes, though — every one of them stands on the door he came out
+    // of, with a step of his own in front of him, because nobody in this game
+    // is ever moved without walking.
     const turnedOut = sim.settlers.all().slice(before);
     expect(turnedOut.length).toBeGreaterThan(2);
-    expect(new Set(turnedOut.map((settler) => settler.point)).size).toBe(turnedOut.length);
     for (const settler of turnedOut) {
-      expect(settler.point).not.toBe(post.point);
-      expect(sim.world.grid.distance(settler.point, post.point)).toBe(1);
+      expect(settler.point).toBe(post.point);
+      expect(settler.fromPoint).toBe(post.point);
+      expect(sim.world.grid.distance(settler.toPoint, post.point)).toBe(1);
     }
+    expect(new Set(turnedOut.map((settler) => settler.toPoint)).size).toBe(turnedOut.length);
+
+    // And a beat apart: no two of them finish that first step on the same tick.
+    const arrivals = turnedOut.map((settler) => settler.stepLength - settler.stepProgress);
+    expect(new Set(arrivals).size).toBe(arrivals.length);
   });
 
   it('lets a man with nowhere to go wander, and then lose him', () => {
@@ -5447,9 +5549,9 @@ describe('a war', () => {
     const sim = contested();
     const home = sim.buildings.require(sim.players[0]!.headquarters);
 
-    // A farm is large, and unlike a fortress it has no garrison and so no grip
-    // of its own. Out at the edge of the hall's claim, where the border would
-    // otherwise run against its wall.
+    // A farm is large, and unlike a fortress it holds no ground of its own.
+    // Out at the edge of the hall's claim, where the border would otherwise run
+    // against its wall.
     let farm: Building | undefined;
     for (const point of [...sim.world.grid.pointsWithin(home.point, HALL_REACH)].reverse()) {
       const space = evaluateBuildSpace(sim.world, point, PLAYER);
@@ -5474,6 +5576,181 @@ describe('a war', () => {
     for (const point of sim.world.grid.pointsWithin(farm!.point, 1)) {
       expect(sim.world.owner[point]).toBe(PLAYER);
     }
+  });
+
+  it('keeps a border two nodes clear of a headquarters, whoever has taken what', () => {
+    const sim = contested();
+    const theirs = sim.buildings.require(sim.players[1]!.headquarters);
+
+    // A post of the player's as near the rival's hall as the ground allows,
+    // manned. Under the old rule its grip reached two nodes and took ground off
+    // the hall's own doorstep.
+    const post = baseNear(sim, theirs.point, 0, 4, 6);
+    holdIt(sim, post);
+
+    // Nothing of anybody else's within two nodes of the hall.
+    for (const point of sim.world.grid.pointsWithin(theirs.point, 2)) {
+      expect(sim.world.owner[point]).toBe(RIVAL);
+    }
+
+    // And so no border line can run in its first ring: a border node is one
+    // whose neighbours are not all its owner's, which is exactly what
+    // `canPlaceFlag` refuses to build on.
+    for (const point of sim.world.grid.pointsWithin(theirs.point, 1)) {
+      expect(isWellInsideTerritory(sim.world, point, RIVAL)).toBe(true);
+    }
+  });
+
+  it('holds a hall’s second ring against everything the rival can bring', () => {
+    const sim = contested();
+    const hall = sim.buildings.require(sim.players[0]!.headquarters);
+
+    // Rival posts crowded as near the player's hall as the ground allows, and
+    // manned: together they push harder on some of the hall's own second ring
+    // than the hall does, which is the only way that ring is ever in question.
+    const planted: Building[] = [];
+    for (const type of [BuildingType.Fortress, BuildingType.WatchTower, BuildingType.Barracks]) {
+      const size = buildingInfo(type).size;
+      for (const point of sim.world.grid.pointsWithin(hall.point, 7)) {
+        if (sim.world.grid.distance(hall.point, point) < 4) continue;
+        // The ground has to be his to build on, as it would be if he had pushed
+        // his frontier this far — the same reach-in `baseNear` uses.
+        for (const near of sim.world.grid.pointsWithin(point, 1)) sim.world.owner[near] = RIVAL;
+
+        const space = evaluateBuildSpace(sim.world, point, RIVAL);
+        if (space === BuildSpace.None || !canHostSize(space, size)) continue;
+        const built = reachIn(sim).createBuilding(type, point, RIVAL);
+        if (!built) continue;
+        built.state = BuildingState.Complete;
+        built.status = BuildingStatus.Working;
+        built.garrison[Rank.Private] = 2;
+        planted.push(built);
+        break;
+      }
+    }
+    // However many of the three the ground will take — what matters is that
+    // between them they out-push the hall somewhere on its second ring.
+    expect(planted.length).toBeGreaterThan(1);
+    for (const post of planted) holdIt(sim, post);
+
+    /** What everybody manned brings to bear on a node, by player. */
+    const pushOn = (point: number): Map<number, number> => {
+      const push = new Map<number, number>();
+      for (const building of sim.buildings.all()) {
+        const behaviour = buildingInfo(building.type).behaviour;
+        const reach =
+          behaviour.kind === 'headquarters'
+            ? HALL_REACH
+            : behaviour.kind === 'military' && garrisonStrength(building.garrison) > 0
+              ? behaviour.radius
+              : 0;
+        const away = sim.world.grid.distance(building.point, point);
+        if (reach <= 0 || away > reach) continue;
+        push.set(building.owner, (push.get(building.owner) ?? 0) + reach - away + 1);
+      }
+      return push;
+    };
+
+    // The nodes of the hall's second ring the rival genuinely out-pushes: they
+    // stay the player's, because two rings are the hall's whatever is brought
+    // to bear on them.
+    const outPushed = sim.world.grid
+      .pointsWithin(hall.point, 2)
+      .filter((point) => (pushOn(point).get(RIVAL) ?? 0) > (pushOn(point).get(PLAYER) ?? 0));
+    expect(outPushed.length).toBeGreaterThan(0);
+    for (const point of outPushed) expect(sim.world.owner[point]).toBe(PLAYER);
+
+    // And so the first ring is well inside, with no border running through it.
+    for (const point of sim.world.grid.pointsWithin(hall.point, 1)) {
+      expect(isWellInsideTerritory(sim.world, point, PLAYER)).toBe(true);
+    }
+  });
+
+  it('dates a captured post from the day it changed hands', () => {
+    const sim = contested();
+    const target = outpostsOf(sim, RIVAL)[0]!;
+    // Manned long before the fight, as the rival's posts all are.
+    expect(target.mannedAt).toBe(0);
+    target.mannedAt = 1;
+
+    const post = baseNear(sim, target.point, 4);
+    holdIt(sim, post);
+    for (let tick = 0; tick < 200 && sim.tick < 40; tick += 1) sim.update();
+
+    expect(sim.attack(PLAYER, target.point, 4).ok).toBe(true);
+    for (let tick = 0; tick < 3000 && target.owner !== PLAYER; tick += 1) sim.update();
+    expect(target.owner).toBe(PLAYER);
+
+    // As old as the day it became his, and not a tick older.
+    const taken = target.mannedAt;
+    expect(taken).toBeGreaterThan(1);
+
+    // And it keeps that date through being emptied and filled again: it is the
+    // same post, and it has not changed hands.
+    for (let tick = 0; tick < 3000 && garrisonStrength(target.garrison) === 0; tick += 1) {
+      sim.update();
+    }
+    expect(garrisonStrength(target.garrison)).toBeGreaterThan(0);
+    target.garrison.fill(0);
+    const soldier = sim.settlers.add(
+      (id) =>
+        ({
+          id,
+          owner: PLAYER,
+          profession: Profession.Soldier,
+          rank: Rank.Private,
+          building: target.id,
+          state: SettlerState.WalkingToJob,
+        }) as Settler,
+    );
+    reachIn(sim).joinGarrison(soldier);
+    expect(target.mannedAt).toBe(taken);
+  });
+
+  it('counts a hall as manned from the beginning, whatever its own book says', () => {
+    const sim = contested();
+    const hall = sim.buildings.require(sim.players[0]!.headquarters);
+    const post = baseNear(sim, hall.point, 3, 6, 9);
+    holdIt(sim, post);
+
+    hall.mannedAt = 500;
+    post.mannedAt = 500;
+
+    expect(reachIn(sim).claimOf(hall, false)?.mannedAt).toBe(0);
+    expect(reachIn(sim).claimOf(post, false)?.mannedAt).toBe(500);
+  });
+
+  it('settles a dead heat by incumbency, then by who has held his place longest', () => {
+    const sim = contested();
+    const claim = (player: number, mannedAt: number, radius = 8): Claim => ({
+      building: player * 10 + mannedAt,
+      point: sim.buildings.require(sim.players[0]!.headquarters).point,
+      radius,
+      mannedAt,
+      player,
+    });
+    const here = sim.buildings.require(sim.players[0]!.headquarters).point;
+    const decide = (claimants: readonly Claim[], incumbent: number): number =>
+      reachIn(sim).strongestClaimTo(here, claimants, incumbent);
+
+    // Pressure first, and it is a sum: two of the player's small claims beat
+    // one bigger one of the rival's that beats either of them alone.
+    expect(decide([claim(PLAYER, 0, 6), claim(RIVAL, 0, 9)], 0)).toBe(RIVAL);
+    expect(decide([claim(PLAYER, 0, 6), claim(PLAYER, 0, 6), claim(RIVAL, 0, 9)], 0)).toBe(PLAYER);
+
+    // A dead heat goes to whoever holds it already, either way round — and
+    // holding it beats having held your place longer.
+    expect(decide([claim(PLAYER, 0), claim(RIVAL, 0)], RIVAL)).toBe(RIVAL);
+    expect(decide([claim(PLAYER, 0), claim(RIVAL, 0)], PLAYER)).toBe(PLAYER);
+    expect(decide([claim(PLAYER, 40), claim(RIVAL, 10)], PLAYER)).toBe(PLAYER);
+    expect(decide([claim(PLAYER, 10), claim(RIVAL, 40)], RIVAL)).toBe(RIVAL);
+
+    // With nobody holding it, to whoever has held his place longest.
+    expect(decide([claim(PLAYER, 40), claim(RIVAL, 10)], 0)).toBe(RIVAL);
+    expect(decide([claim(PLAYER, 10), claim(RIVAL, 40)], 0)).toBe(PLAYER);
+
+    // And only then the lower id.
+    expect(decide([claim(PLAYER, 10), claim(RIVAL, 10)], 0)).toBe(PLAYER);
   });
 
   it('keeps a post five nodes clear of a headquarters', () => {
