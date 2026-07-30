@@ -114,6 +114,12 @@ export interface Building {
    * than nine times a second. Rebuilt from the world by `reconcileIncoming`.
    */
   garrisonRequested: number;
+  /**
+   * Ticks before the next defender steps out of the door, so an attacker faces
+   * one man at a time with a breath between them rather than a number ticking
+   * down. Absent in saves older than version 7.
+   */
+  defenderDelay: number;
 }
 
 export const BuildingStatus = {
@@ -162,8 +168,14 @@ export const SettlerState = {
   EnteringBuilding: 12,
   /** A soldier walking to an enemy building he has been sent to take. */
   MarchingToAttack: 13,
-  /** A soldier at an enemy flag, waiting his turn or trading blows. */
+  /** The soldier at an enemy flag, trading blows with whoever comes out. */
   Fighting: 14,
+  /** A soldier inside his own outpost, waiting his turn at the door. */
+  Mustering: 15,
+  /** A soldier standing in the queue behind the man at the enemy flag. */
+  WaitingToFight: 16,
+  /** A soldier out on his building's door, holding it against an attacker. */
+  Defending: 17,
 } as const;
 
 export type SettlerState = (typeof SettlerState)[keyof typeof SettlerState];

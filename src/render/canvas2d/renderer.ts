@@ -496,7 +496,15 @@ export class CanvasRenderer implements Renderer {
 
     simulation.settlers.forEach((settler) => {
       // Settlers inside a building are not drawn; the building stands for them.
-      if (settler.state === SettlerState.AtWork || settler.state === SettlerState.Idle) return;
+      // A soldier waiting his turn at the door is inside it too — he appears
+      // when he steps out, one man at a time.
+      if (
+        settler.state === SettlerState.AtWork ||
+        settler.state === SettlerState.Idle ||
+        settler.state === SettlerState.Mustering
+      ) {
+        return;
+      }
 
       const row = grid.yOf(settler.point);
       if (row < bounds.minRow - 2 || row > bounds.maxRow + 2) return;

@@ -61,19 +61,51 @@ const HEADQUARTERS_RADIUS = 9;
  * scattered farmsteads.
  */
 const RIVAL_OUTPOSTS = 4;
-const RIVAL_OUTPOST_RANGE = 7;
+const RIVAL_OUTPOST_RANGE = 9;
+/**
+ * The near edge of that ring. Posts packed against the headquarters stand
+ * inside its own claim and add nothing but targets — and since a barracks
+ * covers eight nodes, one taken used to swallow the lot.
+ */
+const RIVAL_OUTPOST_REACH = 6;
 
 /**
- * How far an outpost can send men to attack.
+ * What share of a building's radius it takes from a neighbour who already holds
+ * it, as a divisor: a quarter.
+ */
+const TERRITORY_BITE = 4;
+
+/**
+ * How far an outpost can send men, and how many of its spare men reach.
  *
  * The frontier is what carries a war forward: to reach further into a
  * neighbour's ground you have to build towards him first, which is what makes
- * the outposts worth putting up rather than merely worth holding.
+ * the outposts worth putting up rather than merely worth holding. Distance
+ * costs strength rather than forbidding the attack outright, so a second line
+ * of posts behind the first is worth having.
+ *
+ * Whole fractions rather than a multiplier: a third of three men must be one
+ * man on every machine that will ever run this, and floating point does not
+ * promise that.
  */
-const ATTACK_RANGE = 10;
+const ATTACK_BANDS: readonly { readonly within: number; readonly of: number }[] = [
+  { within: 12, of: 3 },
+  { within: 16, of: 2 },
+  { within: 20, of: 1 },
+];
+const ATTACK_RANGE = ATTACK_BANDS[ATTACK_BANDS.length - 1]!.within;
+const ATTACK_BAND_PARTS = 3;
 
 /** Ticks between blows, so a fight is something a player can watch happen. */
 const DUEL_TICKS = 12;
+
+/**
+ * Ticks between one defender falling and the next stepping out of the door.
+ *
+ * Long enough to read as one man replacing another rather than a number ticking
+ * down, short enough that a garrison of nine is a fight and not a siege.
+ */
+const DEFENDER_PAUSE = 10;
 
 /** Saplings advance one growth stage every this many ticks. */
 const TREE_GROWTH_INTERVAL = 260;
@@ -406,6 +438,20 @@ export interface SimulationSnapshot {
 
 export type CommandResult = { readonly ok: true } | { readonly ok: false; readonly reason: string };
 
+/** A building holding ground, for `redrawTerritory` to work a border out from. */
+interface Claimant {
+  readonly point: number;
+  readonly radius: number;
+  readonly bite: number;
+  readonly player: number;
+}
+
+/** A point that has changed hands, and who has just lost it. */
+interface Overrun {
+  readonly point: number;
+  readonly loser: number;
+}
+
 const OK: CommandResult = { ok: true };
 const fail = (reason: string): CommandResult => ({ ok: false, reason });
 
@@ -518,7 +564,7 @@ export class Simulation {
     let raised = 0;
     for (const point of this.world.grid.pointsWithin(headquarters.point, RIVAL_OUTPOST_RANGE)) {
       if (raised >= RIVAL_OUTPOSTS) break;
-      if (this.world.grid.distance(headquarters.point, point) < 4) continue;
+      if (this.world.grid.distance(headquarters.point, point) < RIVAL_OUTPOST_REACH) continue;
 
       const space = evaluateBuildSpace(this.world, point, owner);
       if (space === BuildSpace.None || !canHostSize(space, buildingInfo(Type.Barracks).size)) {
@@ -639,30 +685,33 @@ export class Simulation {
       return fail('No outpost of yours is near enough to send anybody.');
     }
 
-    const spare = menToSpareIn(from);
+    const spare = this.menInReachOf(from, target.point);
     if (spare <= 0) return fail('Your outposts have nobody to spare.');
 
     const sending = Math.min(Math.max(1, Math.floor(men)), spare);
     let sent = 0;
 
     for (const post of from) {
-      while (sent < sending && garrisonStrength(post.garrison) > 1) {
+      const allowed = menToSendFrom(post, this.world.grid.distance(post.point, target.point));
+      let fromHere = 0;
+
+      while (sent < sending && fromHere < allowed && garrisonStrength(post.garrison) > 1) {
         const rank = strongestIn(post.garrison);
         if (rank === undefined) break;
 
         post.garrison[rank] = post.garrison[rank]! - 1;
 
+        // He starts inside, and leaves when the door is clear: an outpost has
+        // one way out, the same as a store, and men appearing on the map six at
+        // a time is a conjuring trick rather than a sortie.
         const soldier = this.createSettler(player, Profession.Soldier, post.point);
         soldier.rank = rank;
         soldier.building = target.id;
-        soldier.taskPoint = target.flagPoint;
-        soldier.state = SettlerState.MarchingToAttack;
-
-        const path = walkablePath(this.world, post.point, target.flagPoint);
-        this.setPath(soldier, path ?? []);
-        if ((path?.length ?? 0) === 0) soldier.state = SettlerState.Fighting;
+        soldier.taskPoint = this.nextStandingPlace(target);
+        soldier.state = SettlerState.Mustering;
 
         sent += 1;
+        fromHere += 1;
       }
     }
 
@@ -677,10 +726,127 @@ export class Simulation {
   }
 
   /**
-   * A soldier reaches the flag of the building he was sent to take.
+   * Where the next man sent against a building is to stand.
    *
-   * If it has already fallen — somebody else's blow landed first, or it was
-   * pulled down — there is nothing to fight, and he goes home.
+   * The flag first — that is the place the fight is had — and behind it a line
+   * of men a node apart, each stepping back from the last away from the walls.
+   * Standing places are held by the man they were given to for the whole march,
+   * so two men never set out for the same node.
+   */
+  private nextStandingPlace(target: Building): number {
+    const taken = new Set<number>();
+    this.settlers.forEach((settler) => {
+      if (settler.building === target.id && isAttacking(settler)) taken.add(settler.taskPoint);
+    });
+
+    let at = target.flagPoint;
+    let heading: Direction | undefined;
+    const line = new Set<number>([at]);
+
+    while (taken.has(at)) {
+      const next = this.nextInLine(target, at, heading, taken, line);
+      // Hemmed in by water or rock with every place taken: he shares the last
+      // one rather than not coming at all.
+      if (next === undefined) return at;
+      at = next.point;
+      heading = next.direction;
+      line.add(at);
+    }
+
+    return at;
+  }
+
+  /**
+   * The next node back along a queue of attackers.
+   *
+   * A man walks out along the men already standing to the end of the queue,
+   * and takes the next place past it: following an occupied node beats
+   * anything, holding the heading beats turning, and leaving the flag at all is
+   * done by whichever way leads furthest from the walls. So the queue is one
+   * line trailing back from the fight rather than a ring around it.
+   */
+  private nextInLine(
+    target: Building,
+    from: number,
+    heading: Direction | undefined,
+    taken: ReadonlySet<number>,
+    line: ReadonlySet<number>,
+  ): { point: number; direction: Direction } | undefined {
+    const ON_THE_LINE = 1000;
+    const STRAIGHT_ON = 100;
+
+    let best: { point: number; direction: Direction } | undefined;
+    let bestScore = -1;
+
+    for (const direction of DIRECTIONS) {
+      const point = this.world.grid.neighbour(from, direction);
+      if (point === OUT_OF_BOUNDS || line.has(point)) continue;
+      if (this.world.building[point] !== 0) continue;
+      if (!this.world.isWalkable(point)) continue;
+
+      const score =
+        (taken.has(point) ? ON_THE_LINE : 0) +
+        (direction === heading ? STRAIGHT_ON : 0) +
+        this.world.grid.distance(target.point, point);
+      if (score <= bestScore) continue;
+
+      best = { point, direction };
+      bestScore = score;
+    }
+
+    return best;
+  }
+
+  /**
+   * A soldier waits inside his outpost until the door is clear, then marches.
+   *
+   * One man on the step at a time, exactly as workers leave a store: an outpost
+   * has one way out, and six men appearing on the map together is a conjuring
+   * trick rather than a sortie.
+   */
+  private stepOutToAttack(settler: Settler): void {
+    const postId = this.world.building[settler.point];
+    const post = postId ? this.buildings.get(postId) : undefined;
+    const target = this.buildings.get(settler.building);
+
+    if (!post || post.owner !== settler.owner) {
+      // The post was taken or pulled down with him still inside it.
+      this.sendHome(settler);
+      return;
+    }
+    if (!target || target.owner === settler.owner || !isAttackable(target)) {
+      this.standDown(settler, post);
+      return;
+    }
+
+    if (!this.takeTheDoorway(post)) return;
+
+    // His standing place may be unreachable when the flag itself is not —
+    // rock behind the walls, or a queue that has wound into a corner.
+    const path =
+      walkablePath(this.world, post.point, settler.taskPoint) ??
+      walkablePath(this.world, post.point, target.flagPoint);
+    if (!path) {
+      this.standDown(settler, post);
+      return;
+    }
+    if (path.length === 0) {
+      settler.taskPoint = post.point;
+      this.arriveAtTheFight(settler);
+      return;
+    }
+
+    settler.taskPoint = path[path.length - 1]!;
+    settler.state = SettlerState.MarchingToAttack;
+    this.setPath(settler, path);
+  }
+
+  /**
+   * A soldier reaches the place he was sent to stand.
+   *
+   * If the building has already fallen — somebody else's blow landed first, or
+   * it was pulled down — there is nothing to fight, and he goes home. The man
+   * at the flag fights; the rest wait a node apart behind him.
    */
   private arriveAtTheFight(settler: Settler): void {
     const target = this.buildings.get(settler.building);
@@ -689,8 +855,31 @@ export class Simulation {
       return;
     }
 
-    settler.state = SettlerState.Fighting;
+    settler.state =
+      settler.point === target.flagPoint ? SettlerState.Fighting : SettlerState.WaitingToFight;
     settler.taskTimer = DUEL_TICKS;
+  }
+
+  /**
+   * A soldier goes back inside the building he came out of, rank intact.
+   *
+   * For a defender whose attackers have all fallen, and for a man mustered for
+   * an attack that no longer has anything to attack.
+   */
+  private standDown(settler: Settler, building: Building | undefined): void {
+    if (
+      !building ||
+      building.owner !== settler.owner ||
+      building.garrison.length === 0 ||
+      this.buildings.get(building.id) !== building
+    ) {
+      this.sendHome(settler);
+      return;
+    }
+
+    building.garrison[settler.rank] = (building.garrison[settler.rank] ?? 0) + 1;
+    building.status = BuildingStatus.Working;
+    this.settlers.remove(settler.id);
   }
 
   /**
@@ -703,9 +892,27 @@ export class Simulation {
    */
   private fightBattles(): void {
     const fronts = new Map<number, Settler[]>();
+    const defenders = new Map<number, Settler>();
+    const comingToTheFlag = new Set<number>();
 
     this.settlers.forEach((settler) => {
-      if (settler.state !== SettlerState.Fighting) return;
+      if (settler.state === SettlerState.Defending) {
+        const already = defenders.get(settler.building);
+        if (!already || settler.id < already.id) defenders.set(settler.building, settler);
+        return;
+      }
+      // A man walking up into the empty place at the flag is out of the group
+      // below while he walks, and the place is his: without this, every tick of
+      // the few he takes to get there would send another man up after him and
+      // the whole queue would end up standing on one node.
+      if (settler.state === SettlerState.MarchingToAttack) {
+        const to = this.buildings.get(settler.building);
+        if (to && settler.taskPoint === to.flagPoint) comingToTheFlag.add(settler.building);
+        return;
+      }
+      if (settler.state !== SettlerState.Fighting && settler.state !== SettlerState.WaitingToFight) {
+        return;
+      }
       const at = fronts.get(settler.building);
       if (at) at.push(settler);
       else fronts.set(settler.building, [settler]);
@@ -722,39 +929,125 @@ export class Simulation {
         continue;
       }
 
-      if (garrisonStrength(target.garrison) <= 0) {
-        this.captureBuilding(target, attackers);
+      const defender = defenders.get(buildingId);
+      // Taken from the map here so that what is left in it at the end is
+      // exactly the defenders whose attackers have all fallen.
+      defenders.delete(buildingId);
+
+      if (!defender) {
+        // A breath between one man falling and the next coming out.
+        if (target.defenderDelay > 0) {
+          target.defenderDelay -= 1;
+          continue;
+        }
+        if (garrisonStrength(target.garrison) <= 0) {
+          this.captureBuilding(target, attackers);
+          continue;
+        }
+        this.sendOutDefender(target);
         continue;
       }
 
-      // The man at the head of the queue is the one trading blows; the rest
-      // wait their turn. Lowest id, so the order never depends on iteration.
-      const front = attackers.reduce((first, other) => (other.id < first.id ? other : first));
+      // Somebody has to be standing at the flag for blows to be traded; if
+      // nobody is, the nearest man waiting is sent forward into the place.
+      const front = this.manAtTheFlag(target, attackers, comingToTheFlag.has(buildingId));
+      if (!front) continue;
+
       front.taskTimer -= 1;
       if (front.taskTimer > 0) continue;
 
       front.taskTimer = DUEL_TICKS;
-      this.exchangeBlows(target, front);
+      this.exchangeBlows(target, front, defender);
+    }
+
+    // Beaten off: whoever is left standing outside goes back in.
+    for (const [buildingId, defender] of defenders) {
+      this.standDown(defender, this.buildings.get(buildingId));
     }
   }
 
   /**
-   * One blow between the man at the front and the best of the defenders.
+   * The man trading blows at a building's flag, if there is one.
+   *
+   * There is exactly one place a fight is had, and it is the flag. When it
+   * falls empty the nearest man waiting in the queue is sent up into it, and
+   * nobody fights that tick — which is what puts a beat between one duel and
+   * the next rather than running them together.
+   */
+  private manAtTheFlag(
+    target: Building,
+    attackers: readonly Settler[],
+    onHisWay: boolean,
+  ): Settler | undefined {
+    let front: Settler | undefined;
+    for (const attacker of attackers) {
+      if (attacker.state !== SettlerState.Fighting) continue;
+      if (!front || attacker.id < front.id) front = attacker;
+    }
+    if (front) return front;
+    if (onHisWay) return undefined;
+
+    let next: Settler | undefined;
+    let nearest = Number.POSITIVE_INFINITY;
+    for (const attacker of attackers) {
+      const distance = this.world.grid.distance(attacker.point, target.flagPoint);
+      if (distance > nearest) continue;
+      if (distance === nearest && next && attacker.id >= next.id) continue;
+      nearest = distance;
+      next = attacker;
+    }
+    if (!next) return undefined;
+
+    next.taskPoint = target.flagPoint;
+    const path = walkablePath(this.world, next.point, target.flagPoint);
+    if (!path || path.length === 0) {
+      next.state = SettlerState.Fighting;
+      next.taskTimer = DUEL_TICKS;
+      return next;
+    }
+
+    next.state = SettlerState.MarchingToAttack;
+    this.redirect(next, path);
+    return undefined;
+  }
+
+  /**
+   * The next man of a garrison steps out onto the door to hold it.
+   *
+   * He leaves the garrison to become somebody on the map, which is what makes a
+   * fight something to watch rather than a count going down; he goes back in
+   * again if the attack is beaten off. The strongest first — the gold that
+   * promoted him was spent for exactly this.
+   */
+  private sendOutDefender(target: Building): void {
+    const rank = strongestIn(target.garrison);
+    if (rank === undefined) return;
+
+    target.garrison[rank] = target.garrison[rank]! - 1;
+
+    const defender = this.createSettler(target.owner, Profession.Soldier, target.point);
+    defender.rank = rank;
+    defender.building = target.id;
+    defender.taskPoint = target.point;
+    defender.state = SettlerState.Defending;
+    defender.taskTimer = DUEL_TICKS;
+  }
+
+  /**
+   * One blow between the man at the flag and the man on the door.
    *
    * The odds run with rank and never to certainty: weights of `rank + 1` give a
    * general five chances against a private's one, and two men of a rank an even
    * fight. Rolled on the simulation's own generator, so a battle replays the
    * same way from the same save.
    */
-  private exchangeBlows(target: Building, attacker: Settler): void {
-    const defending = strongestIn(target.garrison);
-    if (defending === undefined) return;
-
+  private exchangeBlows(target: Building, attacker: Settler, defender: Settler): void {
     const attackerWeight = attacker.rank + 1;
-    const defenderWeight = defending + 1;
+    const defenderWeight = defender.rank + 1;
 
     if (this.rng.nextInt(attackerWeight + defenderWeight) < attackerWeight) {
-      target.garrison[defending] = target.garrison[defending]! - 1;
+      this.settlers.remove(defender.id);
+      target.defenderDelay = DEFENDER_PAUSE;
       return;
     }
 
@@ -765,8 +1058,9 @@ export class Simulation {
    * The last defender has fallen: the building changes hands.
    *
    * It keeps its type and its flag — a captured barracks is a barracks — and
-   * the men who took it become its garrison. Everything the loser held within
-   * its reach goes over with it, buildings included.
+   * the men who took it become its garrison. The ground is then worked out
+   * again, so what goes over is what the loser can no longer cover from
+   * anywhere else, and whatever he left standing on it comes down.
    */
   private captureBuilding(target: Building, attackers: Settler[]): void {
     const behaviour = buildingInfo(target.type).behaviour;
@@ -784,10 +1078,9 @@ export class Simulation {
         MessageCategory.Battle,
         target.point,
       );
+      // `destroyBuilding` redraws the ground it held and settles the war.
       this.destroyBuilding(target);
       for (const attacker of attackers) this.sendHome(attacker);
-      this.seizeTerritory(target.point, radius, winner, loser);
-      this.settleTheWar();
       return;
     }
 
@@ -806,7 +1099,7 @@ export class Simulation {
       this.settlers.remove(attacker.id);
     }
 
-    this.seizeTerritory(target.point, radius, winner, loser);
+    this.redrawTerritory(target.point, radius);
     this.note(
       `${buildingInfo(target.type).name} taken from the ${this.nameOf(loser)}.`,
       MessageCategory.Battle,
@@ -863,7 +1156,21 @@ export class Simulation {
 
   /** How many men could be sent against a point, for the panel to offer. */
   menToSpare(player: number, point: number): number {
-    return menToSpareIn(this.attackersWithin(player, point));
+    return this.menInReachOf(this.attackersWithin(player, point), point);
+  }
+
+  /**
+   * What a set of posts can send against a point between them.
+   *
+   * Counted through the same bands the march itself uses, so what the panel
+   * offers and what actually sets out are the same number.
+   */
+  private menInReachOf(posts: readonly Building[], point: number): number {
+    let total = 0;
+    for (const post of posts) {
+      total += menToSendFrom(post, this.world.grid.distance(post.point, point));
+    }
+    return total;
   }
 
   /** Tears down a building, returning its site to open ground. */
@@ -1184,6 +1491,7 @@ export class Simulation {
       // for the array.
       garrison: keepsSoldiers(info) ? emptyGarrison() : [],
       garrisonRequested: 0,
+      defenderDelay: 0,
     }));
 
     this.world.building[point] = building.id;
@@ -1225,6 +1533,11 @@ export class Simulation {
   }
 
   private destroyBuilding(building: Building): void {
+    // Read before anything is pulled apart: `disbandGarrison` below empties the
+    // very garrison that decides whether this building was holding ground.
+    const held = this.claimRadiusOf(building);
+    const headquarters = buildingInfo(building.type).behaviour.kind === 'headquarters';
+
     // Anything in the building's own stores is simply lost, as in the original.
     this.world.building[building.point] = 0;
     this.world.buildingSize[building.point] = 0;
@@ -1247,17 +1560,27 @@ export class Simulation {
     this.retargetWaresBoundFor(building.id);
 
     this.buildings.remove(building.id);
+
+    // The ground it held is worked out again now it is gone — from the other
+    // buildings, so a neighbouring post keeps what it covers. Without this a
+    // post pulled down kept its province for ever.
+    if (held > 0) this.redrawTerritory(building.point, held);
+
+    // A headquarters can fall without being captured: razed with the ground it
+    // stood on, when the last post covering it has been taken.
+    if (headquarters) this.settleTheWar();
   }
 
-  private destroyFlag(flag: Flag): void {
+  private destroyFlag(flag: Flag, mayMerge = true): void {
     // Whatever is waiting here goes first, while the roads that lead away are
     // still standing to carry it.
     this.rehomeWares(flag);
 
     // A flag with a road on either side is a staging post, not a junction:
     // removing it should join the two stretches back together rather than tear
-    // both down and cut off everything beyond.
-    if (!this.mergeRoadsAt(flag)) {
+    // both down and cut off everything beyond. Not when the flag is being torn
+    // off ground its owner has lost, though — see `razeGround`.
+    if (!mayMerge || !this.mergeRoadsAt(flag)) {
       for (const roadId of [...flag.roads]) {
         const road = this.roads.get(roadId);
         if (road) this.destroyRoad(road);
@@ -1641,49 +1964,179 @@ export class Simulation {
     this.settlers.remove(settler.id);
   }
 
+  /**
+   * Ground a newly manned outpost takes for its owner.
+   *
+   * Open ground within the whole radius, and a neighbour's ground within a
+   * quarter of it — near enough the walls that his men could not hold it with
+   * this post looking down on them. So a border moves by building towards it,
+   * and moves further for a bigger building: two nodes for a barracks, three
+   * for a fortress.
+   */
   private claimTerritory(centre: number, radius: number, player: number): void {
+    const bite = Math.floor(radius / TERRITORY_BITE);
+    const overrun: Overrun[] = [];
+
     for (const point of this.world.grid.pointsWithin(centre, radius)) {
-      if (this.world.owner[point] === 0) this.world.owner[point] = player;
+      const owner = this.world.owner[point]!;
+      if (owner === player) continue;
+
+      if (owner === 0) {
+        this.world.owner[point] = player;
+        continue;
+      }
+
+      if (this.world.grid.distance(centre, point) > bite) continue;
+      this.world.owner[point] = player;
+      overrun.push({ point, loser: owner });
     }
+
+    this.razeGround(overrun);
   }
 
   /**
-   * Takes ground, which claiming never does.
+   * Works out afresh who holds every point in an area.
    *
-   * `claimTerritory` only fills in what belongs to nobody, so until there was
-   * something to fight over no ground could change hands at all. A captured
-   * building's radius goes over whole — unowned ground and the loser's alike —
-   * and anything of his left standing on it comes down.
+   * Ownership used to be patched: laid down when a building was raised and
+   * flipped wholesale when one was captured, which meant a captured outpost's
+   * radius went over even where the loser's headquarters still stood in the
+   * middle of it — one blow could take a whole province. Ground is instead
+   * *derived* here from the buildings that actually hold it, so a capture
+   * changes exactly what the loser can no longer cover and no more.
    *
-   * That last part is what makes taking an outpost worth the men: a frontier
-   * post falls and the sawmills behind it fall with it.
+   * Nearest claimant wins, except that a claimant within its own bite (see
+   * `claimTerritory`) beats a merely nearer one, which is what makes the two
+   * rules agree. Ties go to the lower player id, so the answer never depends on
+   * the order buildings happen to sit in.
+   *
+   * Called when ground can have changed hands — a capture, a demolition — and
+   * never on the ordinary beat: a fortress covers some five hundred points.
    */
-  private seizeTerritory(centre: number, radius: number, winner: number, loser: number): void {
-    const taken: number[] = [];
+  private redrawTerritory(centre: number, radius: number): void {
+    // A post whose last man is out on the door holding it is still held: his
+    // being outside is what a fight looks like, not the walls falling empty.
+    const holding = new Set<number>();
+    this.settlers.forEach((settler) => {
+      if (settler.state === SettlerState.Defending) holding.add(settler.building);
+    });
+
+    const claimants: Claimant[] = [];
+    this.buildings.forEach((building) => {
+      const reach = this.claimRadiusOf(building, holding.has(building.id));
+      if (reach <= 0) return;
+      claimants.push({
+        point: building.point,
+        radius: reach,
+        bite: Math.floor(reach / TERRITORY_BITE),
+        player: building.owner,
+      });
+    });
+
+    const overrun: Overrun[] = [];
 
     for (const point of this.world.grid.pointsWithin(centre, radius)) {
-      const owner = this.world.owner[point];
-      if (owner !== 0 && owner !== loser) continue;
+      const before = this.world.owner[point]!;
+      const holder = this.strongestClaimTo(point, claimants);
+      if (holder === before) continue;
 
-      this.world.owner[point] = winner;
-      if (owner === loser) taken.push(point);
+      this.world.owner[point] = holder;
+      // Ground that merely falls out of a province — a post pulled down with
+      // nothing behind it — leaves what stands on it alone. Only ground taken
+      // by somebody is cleared.
+      if (before !== 0 && holder !== 0) overrun.push({ point, loser: before });
     }
 
-    // Collected first: `destroyBuilding` writes to the very arrays being read.
-    const doomed: Building[] = [];
-    for (const point of taken) {
-      const id = this.world.building[point];
-      const building = id ? this.buildings.get(id) : undefined;
-      if (building && building.owner === loser) doomed.push(building);
+    this.razeGround(overrun);
+  }
+
+  /** Who holds a point, of the buildings covering it. */
+  private strongestClaimTo(point: number, claimants: readonly Claimant[]): number {
+    let holder = 0;
+    let nearest = Number.POSITIVE_INFINITY;
+    let held = false;
+
+    for (const claim of claimants) {
+      const distance = this.world.grid.distance(claim.point, point);
+      if (distance > claim.radius) continue;
+
+      const inBite = distance <= claim.bite;
+      if (held && !inBite) continue;
+      if (inBite && !held) {
+        holder = claim.player;
+        nearest = distance;
+        held = true;
+        continue;
+      }
+      if (distance > nearest) continue;
+      if (distance === nearest && claim.player >= holder) continue;
+
+      holder = claim.player;
+      nearest = distance;
     }
 
-    for (const building of doomed) {
+    return holder;
+  }
+
+  /**
+   * How far a building holds ground, or nought for one that holds none.
+   *
+   * A headquarters always, a military building only while somebody is standing
+   * in it. A storehouse holds nothing: it is a depot, not a post, and taking
+   * one has never moved a border.
+   */
+  private claimRadiusOf(building: Building, defended = false): number {
+    const behaviour = buildingInfo(building.type).behaviour;
+    if (behaviour.kind === 'headquarters') return HEADQUARTERS_RADIUS;
+    if (behaviour.kind !== 'military') return 0;
+    if (building.state !== BuildingState.Complete) return 0;
+    return defended || garrisonStrength(building.garrison) > 0 ? behaviour.radius : 0;
+  }
+
+  /**
+   * Clears what the loser left on ground that has changed hands: his buildings
+   * come down, and his flags are torn with them.
+   *
+   * That last part is what makes taking an outpost worth the men — a frontier
+   * post falls and the sawmills behind it fall with it — and the flags matter
+   * as much as the buildings: leaving them would lace a beaten province with
+   * roads its owner no longer has any ground to walk on.
+   *
+   * Everything is collected before anything is destroyed: `destroyBuilding` and
+   * `destroyFlag` write to the very arrays being read here.
+   */
+  private razeGround(overrun: readonly Overrun[]): void {
+    if (overrun.length === 0) return;
+
+    const doomedBuildings: Building[] = [];
+    const doomedFlags: Flag[] = [];
+
+    for (const { point, loser } of overrun) {
+      const buildingId = this.world.building[point];
+      const building = buildingId ? this.buildings.get(buildingId) : undefined;
+      if (building && building.owner === loser) doomedBuildings.push(building);
+
+      const flagId = this.world.flag[point];
+      const flag = flagId ? this.flags.get(flagId) : undefined;
+      if (flag && flag.owner === loser) doomedFlags.push(flag);
+    }
+
+    for (const building of doomedBuildings) {
+      // Ids are recycled, so a building noted a moment ago can already be
+      // somebody else's by the time the list is walked.
+      if (this.buildings.get(building.id) !== building) continue;
       this.note(
         `${buildingInfo(building.type).name} lost with the ground it stood on.`,
         MessageCategory.Territory,
         building.point,
       );
       this.destroyBuilding(building);
+    }
+
+    for (const flag of doomedFlags) {
+      if (this.flags.get(flag.id) !== flag) continue;
+      // Torn, not merged: joining the two stretches that met here would leave a
+      // road running through ground its owner has just lost.
+      this.destroyFlag(flag, false);
     }
   }
 
@@ -1890,11 +2343,17 @@ export class Simulation {
         if (this.advance(settler)) this.finishBuildingVisit(settler);
         return;
 
+      case SettlerState.Mustering:
+        this.stepOutToAttack(settler);
+        return;
+
       case SettlerState.MarchingToAttack:
         if (this.advance(settler)) this.arriveAtTheFight(settler);
         return;
 
       case SettlerState.Fighting:
+      case SettlerState.WaitingToFight:
+      case SettlerState.Defending:
         // The fight itself is resolved building by building in `fightBattles`,
         // so that one blow lands at a time however many men are stood there.
         return;
@@ -3823,19 +4282,21 @@ export class Simulation {
   }
 
   /**
-   * Which stores have somebody on the step between their door and their flag.
+   * Which buildings have somebody on the step outside their door.
    *
-   * A store has one doorway and it is one man wide. Left ungated, a
+   * A building has one doorway and it is one man wide. Left ungated, a
    * headquarters asked for four workers, a builder and a carrier in the same
    * tick put all six on the flag at once, which looks like a conjuring trick
-   * rather than a settlement.
+   * rather than a settlement — and an outpost ordered to attack would empty
+   * itself onto the map in a single tick.
    *
    * Read off the world rather than remembered: entity ids are recycled here,
    * and a remembered one has twice been the cause of a bug. A single pass over
-   * the settlers catches porters carrying goods out and men leaving for a job
-   * alike, since both take the same step. Only the outward leg counts — a man
-   * walking *back* in must not hold the door, or a store's dispatching would
-   * stall behind its own returning traffic.
+   * the settlers catches porters carrying goods out, men leaving for a job and
+   * soldiers marching to an attack alike, since all take the same step. Only
+   * the outward leg counts — a man walking *back* in stands on the step, not on
+   * the door, so a store's dispatching never stalls behind its own returning
+   * traffic.
    */
   private surveyDoorways(): void {
     this.busyDoorways.clear();
@@ -3846,24 +4307,21 @@ export class Simulation {
       const buildingId = this.world.building[settler.fromPoint];
       if (!buildingId) return;
 
-      const store = this.buildings.get(buildingId);
-      if (!store || !isStore(store)) return;
-      if (settler.toPoint !== store.flagPoint) return;
-
-      this.busyDoorways.add(store.point);
+      const building = this.buildings.get(buildingId);
+      if (building) this.busyDoorways.add(building.point);
     });
   }
 
   /**
-   * Whether a store can let somebody out, and claims the doorway if so.
+   * Whether a building can let somebody out, and claims the doorway if so.
    *
    * Claiming it here as well as in the sweep is what makes the gate hold
    * *within* a tick: two buildings asking the same store for a man in the same
    * tick would otherwise both see a clear step.
    */
-  private takeTheDoorway(store: Building): boolean {
-    if (this.busyDoorways.has(store.point)) return false;
-    this.busyDoorways.add(store.point);
+  private takeTheDoorway(building: Building): boolean {
+    if (this.busyDoorways.has(building.point)) return false;
+    this.busyDoorways.add(building.point);
     return true;
   }
 
@@ -4400,6 +4858,9 @@ export class Simulation {
         // shape for the buildings that will now keep one.
         garrison: b.garrison ?? (keepsSoldiers(buildingInfo(b.type)) ? emptyGarrison() : []),
         garrisonRequested: b.garrisonRequested ?? 0,
+        // Saves written before defenders came out of the door have nobody out
+        // and nobody waiting to be.
+        defenderDelay: b.defenderDelay ?? 0,
       })),
     );
     // Footprints are derived, so no save carries them: rebuild them from the
@@ -4569,15 +5030,31 @@ function keepsSoldiers(info: BuildingInfo): boolean {
  * on, not by storming it.
  */
 /**
- * How many men a set of outposts can send between them.
+ * How many men an outpost can send, at a distance.
  *
- * Each keeps its last: ground is held by the men standing in a building, so an
- * attack that emptied one would give away at home what it went out to win.
+ * Every post keeps its last man whatever the range — ground is held by the men
+ * standing in a building, so an attack that emptied one would give away at home
+ * exactly what it went out to win. The band then decides how many of the rest
+ * can march that far: all of them close by, two thirds further out, a third at
+ * the limit of reach.
  */
-function menToSpareIn(posts: readonly Building[]): number {
-  let total = 0;
-  for (const post of posts) total += Math.max(0, garrisonStrength(post.garrison) - 1);
-  return total;
+function menToSendFrom(post: Building, distance: number): number {
+  const spare = Math.max(0, garrisonStrength(post.garrison) - 1);
+
+  for (const band of ATTACK_BANDS) {
+    if (distance <= band.within) return Math.floor((spare * band.of) / ATTACK_BAND_PARTS);
+  }
+  return 0;
+}
+
+/** Whether a soldier is committed to an attack: mustering, marching or there. */
+function isAttacking(settler: Settler): boolean {
+  return (
+    settler.state === SettlerState.Mustering ||
+    settler.state === SettlerState.MarchingToAttack ||
+    settler.state === SettlerState.WaitingToFight ||
+    settler.state === SettlerState.Fighting
+  );
 }
 
 function isAttackable(building: Building): boolean {
