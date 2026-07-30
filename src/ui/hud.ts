@@ -61,6 +61,7 @@ export function panelSignature(simulation: Simulation, point: number): string {
   const building = buildingId ? simulation.buildings.get(buildingId) : undefined;
   if (building) {
     parts.push(
+      building.owner,
       building.state,
       building.status,
       building.buildProgress,
@@ -110,6 +111,7 @@ export interface HudCallbacks {
   importSave(file: File): void;
   quitToTitle(): void;
   saveAndQuit(): void;
+  attack(point: number, men: number): void;
 }
 
 export interface HudState {
@@ -152,6 +154,8 @@ export class Hud {
   private armed: string | null = null;
   /** True while the menu is asking whether to save before quitting. */
   private quitting = false;
+  /** How many men the attack panel is currently offering to send. */
+  private attackMen = 1;
   private state: HudState = {
     selectedPoint: -1,
     pendingBuilding: null,
@@ -487,6 +491,11 @@ export class Hud {
   }
 
   private showBuildingPanel(building: Building): void {
+    if (building.owner !== this.playerId) {
+      this.showEnemyPanel(building);
+      return;
+    }
+
     const info = buildingInfo(building.type);
     const children: HTMLElement[] = [
       el('h2', { class: 'panel__title' }, info.name),
@@ -558,6 +567,70 @@ export class Hud {
     }
 
     this.showPanel(children);
+  }
+
+  /**
+   * Somebody else's building.
+   *
+   * No Demolish — it was offered on every building regardless of whose it was,
+   * and the command then refused it, which was merely silly until there was
+   * somebody else on the map. What is offered instead is an attack, when there
+   * are men near enough to send.
+   */
+  private showEnemyPanel(building: Building): void {
+    const info = buildingInfo(building.type);
+    const held = garrisonStrength(building.garrison);
+
+    const children: HTMLElement[] = [
+      el('h2', { class: 'panel__title' }, info.name),
+      el('p', { class: 'panel__status' }, `${this.ownerName(building.owner)}'s`),
+    ];
+
+    const behaviour = info.behaviour;
+    const attackable = behaviour.kind === 'military' || behaviour.kind === 'headquarters';
+
+    if (attackable) {
+      children.push(el('p', { class: 'panel__note' }, `Defended by ${held}.`));
+      children.push(el('ul', { class: 'panel__list' }, ...rankList(building.garrison)));
+    }
+
+    const spare = attackable ? this.simulation.menToSpare(this.playerId, building.point) : 0;
+
+    if (attackable && spare > 0) {
+      // Clamped every render: the men available change as a fight goes on, and
+      // an offer to send more than there are would only be refused.
+      this.attackMen = Math.max(1, Math.min(this.attackMen, spare));
+      const men = this.attackMen;
+
+      children.push(
+        el(
+          'div',
+          { class: 'panel__stepper' },
+          button('−', 'panel__step', () => {
+            this.attackMen = Math.max(1, men - 1);
+            this.renderPanel();
+          }),
+          el('span', { class: 'panel__count' }, `${men} of ${spare}`),
+          button('+', 'panel__step', () => {
+            this.attackMen = Math.min(spare, men + 1);
+            this.renderPanel();
+          }),
+        ),
+        button(`Attack with ${men}`, 'panel__action panel__action--danger', () =>
+          this.callbacks.attack(building.point, men),
+        ),
+      );
+    } else if (attackable) {
+      children.push(
+        el('p', { class: 'panel__note' }, 'No outpost of yours is near enough to send anybody.'),
+      );
+    }
+
+    this.showPanel(children);
+  }
+
+  private ownerName(owner: number): string {
+    return this.simulation.players.find((player) => player.id === owner)?.name ?? 'Somebody else';
   }
 
   /**

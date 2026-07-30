@@ -4400,3 +4400,313 @@ describe('outposts keeping their distance', () => {
     expect(restored.placeBuilding(PLAYER, near!, BuildingType.Barracks).ok).toBe(false);
   });
 });
+
+describe('a war', () => {
+  const RIVAL = 2;
+
+  /**
+   * The simulation's private workings, for setting up a battle.
+   *
+   * These tests stage fights that a real game reaches only after an hour of
+   * play — a manned outpost on a contested border, a single blow with known
+   * ranks. Reaching in beats widening the game's own surface with methods that
+   * exist for nobody but the tests.
+   */
+  interface Innards {
+    createBuilding(type: BuildingType, point: number, owner: number): Building | undefined;
+    exchangeBlows(target: Building, attacker: Settler): void;
+  }
+
+  function reachIn(sim: Simulation): Innards {
+    return sim as unknown as Innards;
+  }
+
+  /** A game with a dormant neighbour, as every real game now has. */
+  function contested(seed = 4242): Simulation {
+    return Simulation.create({
+      width: 96,
+      height: 96,
+      seed,
+      players: [
+        { name: 'You', colour: '#c4832b' },
+        { name: 'Rival', colour: '#3f6f9c', dormant: true },
+      ],
+    });
+  }
+
+  function outpostsOf(sim: Simulation, owner: number): Building[] {
+    return sim.buildings
+      .all()
+      .filter(
+        (building) =>
+          building.owner === owner &&
+          buildingInfo(building.type).behaviour.kind === 'military',
+      );
+  }
+
+  function ground(sim: Simulation, owner: number): number {
+    let total = 0;
+    for (let point = 0; point < sim.world.owner.length; point += 1) {
+      if (sim.world.owner[point] === owner) total += 1;
+    }
+    return total;
+  }
+
+  /** Every soldier either side has, in a garrison or in the field. */
+  function soldiers(sim: Simulation, owner: number): number {
+    let total = 0;
+    sim.buildings.forEach((building) => {
+      if (building.owner === owner) total += garrisonStrength(building.garrison);
+    });
+    sim.settlers.forEach((settler) => {
+      if (settler.owner === owner && settler.profession === Profession.Soldier) total += 1;
+    });
+    return total;
+  }
+
+  /** Plants a manned outpost of the player's within reach of a point. */
+  function baseNear(sim: Simulation, target: number, men: number): Building {
+    for (const point of sim.world.grid.pointsWithin(target, 9)) {
+      const away = sim.world.grid.distance(target, point);
+      if (away < 5 || away > 9) continue;
+
+      // The ground has to be his before he can build on it, as it would be if
+      // he had pushed his frontier this far.
+      sim.world.owner[point] = PLAYER;
+      for (const near of sim.world.grid.pointsWithin(point, 1)) sim.world.owner[near] = PLAYER;
+
+      const space = evaluateBuildSpace(sim.world, point, PLAYER);
+      if (space === BuildSpace.None || !canHostSize(space, BuildingSize.Hut)) continue;
+
+      // Reached into rather than built: a barracks needs boards, stone and a
+      // road to the site, and none of that is what these tests are about. The
+      // dormant rival's own outposts are raised exactly this way.
+      const post = reachIn(sim).createBuilding(BuildingType.Barracks, point, PLAYER);
+      if (!post) continue;
+
+      post.state = BuildingState.Complete;
+      post.status = BuildingStatus.Working;
+      post.garrison[Rank.Private] = men;
+      return post;
+    }
+    throw new Error('nowhere to base an attack');
+  }
+
+  /** Runs until the fighting is over, or gives up. */
+  function fightItOut(sim: Simulation, ticks = 4000): number {
+    for (let i = 0; i < ticks; i += 1) {
+      sim.update();
+      const busy = sim.settlers
+        .all()
+        .some(
+          (settler) =>
+            settler.state === SettlerState.MarchingToAttack ||
+            settler.state === SettlerState.Fighting,
+        );
+      if (!busy) return i;
+    }
+    return ticks;
+  }
+
+  it('puts a rival on the island, holding ground', () => {
+    const sim = contested();
+
+    expect(sim.players).toHaveLength(2);
+    const mine = sim.buildings.require(sim.players[0]!.headquarters);
+    const theirs = sim.buildings.require(sim.players[1]!.headquarters);
+    expect(sim.world.grid.distance(mine.point, theirs.point)).toBeGreaterThanOrEqual(18);
+
+    // Manned from the outset: an outpost holds no ground without men in it, so
+    // an unmanned rival would be a rival with no province at all.
+    const posts = outpostsOf(sim, RIVAL);
+    expect(posts.length).toBeGreaterThan(0);
+    for (const post of posts) expect(garrisonStrength(post.garrison)).toBeGreaterThan(0);
+    expect(ground(sim, RIVAL)).toBeGreaterThan(0);
+  });
+
+  it('never stirs: the rival builds nothing and sends nobody', () => {
+    const sim = contested();
+    const before = sim.buildings.all().filter((building) => building.owner === RIVAL).length;
+
+    run(sim, 3000);
+
+    expect(sim.buildings.all().filter((building) => building.owner === RIVAL)).toHaveLength(before);
+    expect(sim.settlers.all().filter((settler) => settler.owner === RIVAL)).toHaveLength(0);
+  });
+
+  it('refuses an attack that makes no sense, and says why', () => {
+    const sim = contested();
+    const target = outpostsOf(sim, RIVAL)[0]!;
+    const mine = sim.buildings.require(sim.players[0]!.headquarters);
+
+    const own = sim.attack(PLAYER, mine.point, 1);
+    expect(own.ok).toBe(false);
+    expect(own.ok === false && own.reason).toContain('yours already');
+
+    // Nothing near enough to send anybody: the frontier has to be pushed out
+    // before a neighbour can be reached at all.
+    const far = sim.attack(PLAYER, target.point, 1);
+    expect(far.ok).toBe(false);
+    expect(far.ok === false && far.reason).toContain('near enough');
+
+    // And an outpost down to its last man cannot spare him — holding the
+    // ground is what he is for.
+    baseNear(sim, target.point, 1);
+    const thin = sim.attack(PLAYER, target.point, 1);
+    expect(thin.ok).toBe(false);
+    expect(thin.ok === false && thin.reason).toContain('nobody to spare');
+  });
+
+  it('sends the men, and never the last one', () => {
+    const sim = contested();
+    const target = outpostsOf(sim, RIVAL)[0]!;
+    const post = baseNear(sim, target.point, 4);
+
+    // Four men in the post, three of them free to go: what is offered and what
+    // marches are the same number, and it is one short of the garrison.
+    expect(sim.menToSpare(PLAYER, target.point)).toBe(3);
+    expect(sim.attack(PLAYER, target.point, 99).ok).toBe(true);
+
+    // Three marched, one stayed to hold the ground.
+    expect(garrisonStrength(post.garrison)).toBe(1);
+    expect(
+      sim.settlers.all().filter((settler) => settler.state === SettlerState.MarchingToAttack),
+    ).toHaveLength(3);
+  });
+
+  it('takes the building and the ground under it', () => {
+    const sim = contested();
+    const target = outpostsOf(sim, RIVAL)[0]!;
+    baseNear(sim, target.point, 8);
+
+    const before = ground(sim, RIVAL);
+    expect(sim.attack(PLAYER, target.point, 7).ok).toBe(true);
+    fightItOut(sim);
+
+    const taken = sim.buildings.require(target.id);
+    expect(taken.owner).toBe(PLAYER);
+    expect(garrisonStrength(taken.garrison)).toBeGreaterThan(0);
+    expect(ground(sim, RIVAL)).toBeLessThan(before);
+  });
+
+  it('is beaten off when too few are sent', () => {
+    const sim = contested();
+    const target = outpostsOf(sim, RIVAL)[0]!;
+    baseNear(sim, target.point, 2);
+
+    expect(sim.attack(PLAYER, target.point, 1).ok).toBe(true);
+    fightItOut(sim);
+
+    const held = sim.buildings.require(target.id);
+    expect(held.owner).toBe(RIVAL);
+    expect(garrisonStrength(held.garrison)).toBeGreaterThan(0);
+  });
+
+  it('kills nobody it did not have to', () => {
+    const sim = contested();
+    const target = outpostsOf(sim, RIVAL)[0]!;
+    baseNear(sim, target.point, 8);
+
+    const before = soldiers(sim, PLAYER) + soldiers(sim, RIVAL);
+    expect(sim.attack(PLAYER, target.point, 7).ok).toBe(true);
+    fightItOut(sim);
+
+    // Men die in a fight and nowhere else. Conjuring one is as bad as losing
+    // one, and leaving the attackers standing about after a capture would do
+    // exactly that — so the count is pinned from both sides, not merely
+    // observed to have fallen.
+    const after = soldiers(sim, PLAYER) + soldiers(sim, RIVAL);
+    expect(after).toBeLessThan(before);
+    expect(after).toBeGreaterThanOrEqual(before - 15);
+
+    // And nobody is left standing at a building his own side now holds.
+    expect(
+      sim.settlers.all().filter((settler) => settler.state === SettlerState.Fighting),
+    ).toHaveLength(0);
+  });
+
+  it('lets rank tell, without making it certain', () => {
+    // Many blows on one seed rather than one roll: the odds run with rank, and
+    // what matters is that they run, not how any single blow lands.
+    const sim = contested();
+    const ROUNDS = 200;
+
+    const strike = (attacker: number, defender: number): boolean => {
+      const garrison = [0, 0, 0, 0, 0];
+      garrison[defender] = 1;
+      const target = { garrison } as Building;
+      const man = { id: 1, rank: attacker } as Settler;
+
+      reachIn(sim).exchangeBlows(target, man);
+      return garrison[defender] === 0;
+    };
+
+    let generalWins = 0;
+    let evenWins = 0;
+    for (let i = 0; i < ROUNDS; i += 1) {
+      if (strike(Rank.General, Rank.Private)) generalWins += 1;
+      if (strike(Rank.Private, Rank.Private)) evenWins += 1;
+    }
+
+    // Five weights against one: a general should take about five in six, and a
+    // private against a private about half. Neither ever certain.
+    expect(generalWins / ROUNDS).toBeGreaterThan(0.7);
+    expect(generalWins).toBeLessThan(ROUNDS);
+    expect(evenWins / ROUNDS).toBeGreaterThan(0.35);
+    expect(evenWins / ROUNDS).toBeLessThan(0.65);
+  });
+
+  it('survives a save taken mid-battle', () => {
+    const sim = contested();
+    const target = outpostsOf(sim, RIVAL)[0]!;
+    baseNear(sim, target.point, 8);
+    expect(sim.attack(PLAYER, target.point, 7).ok).toBe(true);
+
+    // Far enough for the men to be on the road and not yet at the flag.
+    run(sim, 20);
+    const marching = sim.settlers
+      .all()
+      .filter(
+        (settler) =>
+          settler.state === SettlerState.MarchingToAttack ||
+          settler.state === SettlerState.Fighting,
+      );
+    expect(marching.length).toBeGreaterThan(0);
+
+    const restored = Simulation.fromSnapshot(sim.toSnapshot());
+    const carriedOver = restored.settlers
+      .all()
+      .filter(
+        (settler) =>
+          settler.state === SettlerState.MarchingToAttack ||
+          settler.state === SettlerState.Fighting,
+      );
+    expect(carriedOver).toHaveLength(marching.length);
+    expect(carriedOver.map((settler) => settler.rank).sort()).toEqual(
+      marching.map((settler) => settler.rank).sort(),
+    );
+
+    // And the fight goes on rather than the men standing about for ever.
+    fightItOut(restored);
+    expect(restored.buildings.require(target.id).owner).toBe(PLAYER);
+  });
+
+  it('ends the war when a headquarters falls', () => {
+    const sim = contested();
+    const theirs = sim.buildings.require(sim.players[1]!.headquarters);
+    baseNear(sim, theirs.point, 12);
+
+    expect(sim.attack(PLAYER, theirs.point, 11).ok).toBe(true);
+    fightItOut(sim, 8000);
+
+    expect(sim.winner).toBe(PLAYER);
+
+    // And a decided war takes no more orders. Checked by its *words*: the
+    // headquarters is gone, so "there is nothing there" would refuse it too,
+    // and the test would have proved nothing.
+    const mine = sim.buildings.require(sim.players[0]!.headquarters);
+    const after = sim.attack(PLAYER, mine.point, 1);
+    expect(after.ok).toBe(false);
+    expect(after.ok === false && after.reason).toContain('war is over');
+  });
+});

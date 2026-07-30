@@ -9,4 +9,4 @@
  * Bump it whenever the shape of a snapshot changes. Older saves are read on
  * purpose: `Simulation.fromSnapshot` fills in whatever they predate.
  */
-export const SAVE_VERSION = 5;
+export const SAVE_VERSION = 6;

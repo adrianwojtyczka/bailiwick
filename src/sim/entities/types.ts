@@ -160,6 +160,10 @@ export const SettlerState = {
   DeliveringToFlag: 11,
   /** A carrier stepping inside a building to hand a ware over, and back out. */
   EnteringBuilding: 12,
+  /** A soldier walking to an enemy building he has been sent to take. */
+  MarchingToAttack: 13,
+  /** A soldier at an enemy flag, waiting his turn or trading blows. */
+  Fighting: 14,
 } as const;
 
 export type SettlerState = (typeof SettlerState)[keyof typeof SettlerState];

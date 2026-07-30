@@ -260,3 +260,75 @@
 .messages__item--granite { border-left-color: #9a9187; }
 .messages__item--water { border-left-color: #5f92ad; }
 .messages__item--survey { border-left-color: $ink-soft; }
+
+
+/**
+ * The stepper on an attack: how many men to send.
+ *
+ * Two big targets either side of the count, because this is chosen with a thumb
+ * on a map that is still moving underneath.
+ */
+.panel__stepper {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0.5rem 0;
+}
+
+.panel__step {
+  @include tappable;
+
+  min-width: 2.75rem;
+  border: 1px solid $rule;
+  background: $parchment-deep;
+  color: $ink;
+  font-size: 1.1rem;
+}
+
+.panel__count {
+  flex: 1;
+  text-align: center;
+  font-size: 0.95rem;
+}
+
+/**
+ * The end of the war, over the map rather than instead of it: whoever has just
+ * won or lost wants to see the ground it happened on.
+ */
+.ending {
+  @include safe-area(1.25rem);
+
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.75rem;
+  background: color-mix(in srgb, $ink 62%, transparent);
+  color: $parchment;
+  text-align: center;
+}
+
+.ending__title {
+  margin: 0;
+  font-family: $font-body;
+  font-size: clamp(1.6rem, 7vw, 2.4rem);
+  font-weight: 600;
+}
+
+.ending__note {
+  margin: 0;
+  max-width: 24rem;
+  font-size: 0.95rem;
+  line-height: 1.5;
+}
+
+.ending__action {
+  @include tappable;
+
+  border: 1px solid $rule;
+  background: $parchment;
+  color: $ink;
+  font-size: 1rem;
+}

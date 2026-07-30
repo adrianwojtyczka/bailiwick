@@ -107,7 +107,12 @@ async function startNewGame(seed: number, named: boolean): Promise<void> {
         width: MAP_SIZE,
         height: MAP_SIZE,
         seed,
-        players: [{ name: 'You', colour: '#c4832b' }],
+        players: [
+          { name: 'You', colour: '#c4832b' },
+          // A neighbour on every island. It holds ground and defends it, and
+          // never builds or attacks — see `PlayerConfig.dormant`.
+          { name: 'Rival', colour: '#3f6f9c', dormant: true },
+        ],
       }),
     );
   } catch (error) {

@@ -6,7 +6,7 @@ import type { BuildingType } from '../sim/data/buildings';
 import type { Simulation } from '../sim/simulation';
 import { TICKS_PER_SECOND } from '../sim/simulation';
 import { planRoad } from '../sim/transport/pathfinding';
-import { el } from '../ui/dom';
+import { button, el } from '../ui/dom';
 import { Hud } from '../ui/hud';
 import { attachGestures } from '../ui/input/gestures';
 import { BASE_SPEED, GameLoop } from './loop';
@@ -96,6 +96,7 @@ export class GameSession {
       importSave: (file) => void this.importFromFile(file),
       quitToTitle: () => this.onQuit(),
       saveAndQuit: () => void this.saveAndQuit(),
+      attack: (point, men) => this.run(() => simulation.attack(playerId, point, men)),
     });
 
     this.loop = new GameLoop(
@@ -144,7 +145,44 @@ export class GameSession {
   private step(): void {
     this.simulation.update();
 
+    if (this.simulation.winner !== 0) {
+      this.endTheWar();
+      return;
+    }
+
     if (this.simulation.tick % AUTOSAVE_INTERVAL === 0) void this.autosave();
+  }
+
+  /**
+   * The war is decided: stop the clock and say so over the map.
+   *
+   * The map stays underneath rather than being cleared — a player wants to look
+   * at what he won or lost — and the only way on is back to the title, since
+   * there is nothing left to do here.
+   */
+  private endTheWar(): void {
+    this.loop.stop();
+
+    const won = this.simulation.winner === this.playerId;
+    const winner = this.simulation.players.find(
+      (player) => player.id === this.simulation.winner,
+    );
+
+    this.hudRoot.append(
+      el(
+        'div',
+        { class: 'ending' },
+        el('h2', { class: 'ending__title' }, won ? 'The province is yours' : 'Your province has fallen'),
+        el(
+          'p',
+          { class: 'ending__note' },
+          won
+            ? 'Every rival headquarters has been thrown down.'
+            : `${winner?.name ?? 'Your rival'} took your headquarters.`,
+        ),
+        button('Back to the title', 'ending__action', () => this.onQuit()),
+      ),
+    );
   }
 
   private draw(alpha: number): void {
