@@ -4,11 +4,9 @@ A web remake of *The Settlers II*: offline-capable, saves kept on the device and
 exportable, playable on a phone. TypeScript and SCSS in `src/`, the built game
 committed at the repository root so GitHub Pages serves it as-is.
 
-`README.md` describes the game and how it is put together — read it first, with
-one caveat: its "What is in, and what is next" section has fallen behind. Its
-"still to come" list has soldiers and opponents as unbuilt, and both have since
-been built — garrisons, ranks bought with coin, attacking across a border, and
-a rival province on every island. Treat that section as history, not as a plan.
+`README.md` describes the game, how it is put together, and what is built so far
+— read it first, and keep its "What is in, and what is next" section honest as
+features land.
 
 This file is about *working* on the project: the rules the code holds itself to,
 the traps that have already cost time, and how a round of work is expected to be

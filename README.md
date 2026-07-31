@@ -1,9 +1,10 @@
 # Bailiwick
 
 A settlement-building real-time strategy game in the spirit of *The Settlers II*:
-you build an economy rather than an army. Claim territory by building, lay the
-road network that every good travels along, and grow a handful of huts into a
-province that feeds itself.
+the economy is the army. Claim territory by building, lay the road network that
+every good travels along, and grow a handful of huts into a province that feeds
+itself — and then arms itself, because a frontier is only held by men a whole
+chain of trades had to produce.
 
 It runs entirely in the browser, works offline, and is built for a phone as much
 as a desktop.
@@ -20,6 +21,10 @@ GitHub Pages serves it directly and no build step is needed to play.
   same menu where your thumb already is.
 - **Lay a road** from any flag, then drag to where it should end. Goods only
   move along roads, and every stretch between two flags gets its own carrier.
+- **Attack** by tapping an enemy post and choosing how many men to send. Your
+  nearby outposts answer: all their spare men within twelve nodes, two thirds
+  within sixteen, a third within twenty, and nobody at all beyond — so reaching
+  further into a neighbour's ground means building towards him first.
 - Games save to the device and can be **exported as a file**. Nothing is
   uploaded anywhere.
 - `?seed=12345` in the URL generates a specific island, so a map can be shared
@@ -32,6 +37,11 @@ needs trees within reach, a sawmill turns its logs into boards, and a quarry
 works granite outcrops. Connect each new building to the network with a road, or
 nothing will ever reach it. Pair every woodcutter with a forester, or the woods
 around it will be gone within the hour.
+
+There is a rival on the island, holding a province of his own behind a ring of
+outposts. He will not come for you, but the ore you need is as likely to be
+under his ground as yours — so a barracks on the frontier, and eventually the
+swords, shields and beer to fill it, is how a province keeps growing.
 
 ## Development
 
@@ -79,6 +89,18 @@ why roads, slopes and building sites behave the way they do.
 of image copies rather than redrawing a hundred thousand triangles. The renderer
 sits behind an interface, leaving room for a WebGL terrain layer later.
 
+**A border is pressure, not a patch.** Ground is derived afresh from the
+buildings that hold it, never painted on when one is raised or flipped when one
+is taken. Every building covering a node pushes with its reach less the walk,
+and the player pushing hardest in total holds it — so two posts either side of a
+stretch out-hold the one bigger building facing them, and a single captured
+barracks does not out-hold a hall and the posts standing with it. On top of that
+each building keeps a ring whatever the pressure: two nodes for a hall or a
+fortress, so no border can run against its wall, one for anything else holding
+ground, so a post is never razed by the border it has just redrawn. Whatever
+falls outside a border when it moves is cleared — buildings, flags and the roads
+between them — which is what makes taking a frontier post worth the men.
+
 **No original Settlers II artwork is used.** Every sprite is drawn in code at
 load time, in the parchment-and-ink palette of the title screen — which also
 keeps the download to a single script and makes offline play immediate.
@@ -87,7 +109,8 @@ keeps the download to a single script and makes offline play immediate.
 
 Playable now: the road and carrier network, construction sites that rise as
 their materials arrive, settlers taking up trades, a population that grows as
-the province does, saving and export, and these chains —
+the province does, saving and export, a rival province to take ground from, and
+these chains —
 
 - **Wood and stone** — woodcutters, foresters, sawmills, quarries.
 - **Food** — wells, fisheries, farms sowing and reaping their own fields,
@@ -100,14 +123,21 @@ the province does, saving and export, and these chains —
   makes whichever tool the player is shortest of.
 - **Territory** — outposts from a barracks to a fortress, each claiming the
   ground that lets a province reach the mountains.
+- **Soldiers** — a sword, a shield and a beer make one man, trained in a store
+  and marched out to whichever post is short. A gold coin carried to a post
+  promotes the man who needs it most, private to general, so the gold chain is
+  what makes a frontier hold.
+- **War** — order an attack on any enemy post within twenty nodes and your men
+  set out one at a time, queue at its flag, and fight whoever comes out of the
+  door. Take the post and it is yours to man; take a headquarters and the
+  province behind it falls with it, which is how a game is won or lost.
 
 Still to come:
 
-- **Soldiers** — garrisons for the outposts, ranks bought with coin and beer,
-  and attacking across a border. The outposts hold ground but stand empty.
 - **Hunters** — waiting on game animals, which the map does not yet carry.
 - **Expansion** — shipyards, harbours, expeditions, catapults, fog of war.
-- **Opponents** — computer players, statistics, and scenario maps.
+- **Opponents** — a rival that builds and expands rather than holding the ring
+  of outposts it wakes up with, plus statistics and scenario maps.
 
 ## Licence
 
