@@ -4920,55 +4920,185 @@ describe('a war', () => {
     baseNear(sim, target.point, 8);
     expect(sim.attack(PLAYER, target.point, 6).ok).toBe(true);
 
-    /** The men outside the target, nearest the flag first. */
-    const line = (): Settler[] =>
+    /**
+     * The men committed to the target, in the order of the line: from the flag
+     * outwards, each place a node from the last. Read off the places they hold
+     * rather than where they are standing, since a man walking up into a place
+     * is in it as far as the queue is concerned — and followed rather than
+     * sorted by distance, because the line curves round the walls.
+     */
+    const line = (): Settler[] => {
+      const committed = sim.settlers
+        .all()
+        .filter((settler) => settler.building === target.id && AT_WAR.includes(settler.state));
+
+      const ordered: Settler[] = [];
+      let at = target.flagPoint;
+      for (;;) {
+        const next = committed.find(
+          (man) => !ordered.includes(man) && sim.world.grid.distance(man.taskPoint, at) <= 1,
+        );
+        if (!next) return ordered;
+        ordered.push(next);
+        at = next.taskPoint;
+      }
+    };
+
+    // Wait until the line has formed up a few deep.
+    for (let i = 0; i < 2000 && line().length < 4; i += 1) sim.update();
+    const formed = line();
+    expect(formed.length).toBeGreaterThan(3);
+
+    // Every place is a node from the one ahead of it: that is the line.
+    const gaps = (men: readonly Settler[]): number[] =>
+      men.slice(1).map((man, i) => sim.world.grid.distance(man.taskPoint, men[i]!.taskPoint));
+    expect(gaps(formed).every((gap) => gap === 1)).toBe(true);
+
+    // The man at the flag falls. Everybody behind takes the place of the man
+    // ahead of him, where the line used to keep his node empty for the rest of
+    // the fight.
+    const front = formed[0]!;
+    expect(front.taskPoint).toBe(target.flagPoint);
+    const behind = formed.slice(1);
+    const wasAt = behind.map((man) => man.taskPoint);
+    sim.settlers.remove(front.id);
+    sim.update();
+
+    const moved = behind.filter((man) => sim.settlers.get(man.id) === man);
+    expect(moved.length).toBeGreaterThan(2);
+    for (const man of moved) {
+      expect(man.taskPoint).toBe(wasAt[behind.indexOf(man) - 1] ?? target.flagPoint);
+    }
+    expect(gaps(line()).every((gap) => gap === 1)).toBe(true);
+  });
+
+  it('bends the queue round the walls instead of trailing it away straight', () => {
+    const sim = contested();
+    const target = outpostsOf(sim, RIVAL)[0]!;
+    const post = baseNear(sim, target.point, 12);
+    // A garrison that cannot be beaten, so the whole party forms up and stays.
+    target.garrison.fill(0);
+    target.garrison[Rank.General] = 9;
+    expect(sim.attack(PLAYER, target.point, post.garrison[Rank.Private]! - 1).ok).toBe(true);
+
+    /** The places the party holds, followed from the flag outwards. */
+    const places = (): number[] => {
+      const held = sim.settlers
+        .all()
+        .filter((settler) => settler.building === target.id && AT_WAR.includes(settler.state))
+        .map((settler) => settler.taskPoint);
+
+      const line: number[] = [];
+      let at = target.flagPoint;
+      for (;;) {
+        const next = held.findIndex(
+          (place) => !line.includes(place) && sim.world.grid.distance(place, at) <= 1,
+        );
+        if (next < 0) return line;
+        at = held[next]!;
+        line.push(at);
+      }
+    };
+
+    for (let i = 0; i < 400 && places().length < 6; i += 1) sim.update();
+    const line = places();
+    expect(line.length).toBeGreaterThan(5);
+
+    // Nothing doubles back: every place is at least as far from the walls as
+    // the one before it, so the queue leads away from the fight.
+    const away = line.map((place) => sim.world.grid.distance(target.point, place));
+    for (let i = 1; i < away.length; i += 1) expect(away[i]!).toBeGreaterThanOrEqual(away[i - 1]!);
+
+    // And it bends: a straight tail would keep gaining a node on the walls the
+    // whole way, where an arc settles at a distance and curves round.
+    expect(away[away.length - 1]).toBeLessThan(line.length - 1);
+    expect(new Set(away).size).toBeLessThan(line.length);
+  });
+
+  it('keeps the door shut until a man is standing on the flag', () => {
+    const sim = contested();
+    const target = outpostsOf(sim, RIVAL)[0]!;
+    baseNear(sim, target.point, 8);
+    expect(sim.attack(PLAYER, target.point, 6).ok).toBe(true);
+
+    const onTheDoor = (): Settler[] =>
+      sim.settlers
+        .all()
+        .filter(
+          (settler) => settler.state === SettlerState.Defending && settler.building === target.id,
+        );
+    const onTheFlag = (): Settler[] =>
       sim.settlers
         .all()
         .filter(
           (settler) =>
             settler.building === target.id &&
-            (settler.state === SettlerState.Fighting ||
-              settler.state === SettlerState.WaitingToFight),
-        )
-        .sort(
-          (a, b) =>
-            sim.world.grid.distance(a.point, target.flagPoint) -
-            sim.world.grid.distance(b.point, target.flagPoint),
+            settler.state === SettlerState.Fighting &&
+            settler.point === target.flagPoint,
         );
 
-    // Wait until the whole party is standing in its places.
-    for (let i = 0; i < 2000 && line().length < 4; i += 1) sim.update();
-    const formed = line();
-    expect(formed.length).toBeGreaterThan(3);
-
-    // Every man is a node from the man ahead of him: that is the line.
-    const gaps = (men: readonly Settler[]): number[] =>
-      men.slice(1).map((man, i) => sim.world.grid.distance(man.point, men[i]!.point));
-    expect(gaps(formed).every((gap) => gap === 1)).toBe(true);
-
-    // The man at the flag falls. Everybody behind moves up into the place of
-    // the man ahead of him, where the line used to keep his node empty for the
-    // rest of the fight.
-    const front = formed[0]!;
-    expect(front.point).toBe(target.flagPoint);
-    const behind = formed.slice(1);
-    const wasAt = behind.map((man) => man.point);
-    sim.settlers.remove(front.id);
-
-    for (let i = 0; i < 60; i += 1) {
+    let marched = 0;
+    let out = -1;
+    let knocked = -1;
+    for (let i = 0; i < 2000; i += 1) {
       sim.update();
-      if (behind[0]!.point === target.flagPoint) break;
+      // Men on the road with nobody yet at the flag: the fight is ordered but
+      // has not arrived, and the garrison has no business turning out for it.
+      if (onTheFlag().length === 0 && atWar(sim).length > 0) {
+        marched += 1;
+        expect(onTheDoor()).toHaveLength(0);
+      }
+      if (out < 0 && onTheDoor().length > 0) out = i;
+      if (knocked < 0 && onTheFlag().length > 0) knocked = i;
+      if (out >= 0) break;
     }
 
-    // Each of them stands where the man ahead of him stood. Men die in a fight,
-    // so only those still on their feet are asked about — and there are enough
-    // of them for the shuffle to be the thing under test.
-    const moved = behind.filter((man) => sim.settlers.get(man.id) === man);
-    expect(moved.length).toBeGreaterThan(1);
-    for (const man of moved) {
-      expect(man.point).toBe(wasAt[behind.indexOf(man) - 1] ?? target.flagPoint);
+    // He had a long walk to stand through, and stayed inside for all of it.
+    expect(marched).toBeGreaterThan(20);
+    // And he comes out on the knock, not before it.
+    expect(knocked).toBeGreaterThan(0);
+    expect(out).toBe(knocked);
+  });
+
+  it('sends a man whose fight is already over back to his own post', () => {
+    const sim = contested();
+    const target = outpostsOf(sim, RIVAL)[0]!;
+    // Six men in a tower that holds six, five of them sent: one place is kept,
+    // one man goes into the place they take, and the rest have room to come
+    // home — so anybody who ends up at a store did so by choice of rule, not
+    // for want of a bed.
+    const post = baseNear(sim, target.point, 6, 5, 9, BuildingType.WatchTower);
+    holdIt(sim, post);
+    supply(sim, post, 20);
+    expect(sim.attack(PLAYER, target.point, 5).ok).toBe(true);
+
+    // Taken the moment the first man arrives, so the rest are still walking.
+    for (let i = 0; i < 2000 && target.owner !== PLAYER; i += 1) {
+      target.garrison.fill(0);
+      sim.update();
     }
-    expect(gaps(line()).every((gap) => gap === 1)).toBe(true);
+    expect(target.owner).toBe(PLAYER);
+
+    const stillWalking = sim.settlers
+      .all()
+      .filter((settler) => settler.homePost === post.id && AT_WAR.includes(settler.state));
+    expect(stillWalking.length).toBeGreaterThan(0);
+
+    // The place they were making for is somebody else's now, so they turn
+    // round — and a man turns round towards the post he marched out of, which
+    // has room for him, not to a store on the other side of the province.
+    sim.update();
+    const turned = stillWalking.filter((settler) => sim.settlers.get(settler.id) === settler);
+    expect(turned.length).toBe(stillWalking.length);
+    for (const settler of turned) {
+      expect(settler.state).toBe(SettlerState.WalkingToJob);
+      expect(settler.building).toBe(post.id);
+    }
+
+    // And they get there: the tower ends up holding the men it sent out, less
+    // whoever went into the place they took.
+    for (let i = 0; i < 2000; i += 1) sim.update();
+    expect(garrisonStrength(post.garrison)).toBeGreaterThanOrEqual(turned.length);
   });
 
   it('keeps the man on the door out until the last attacker is gone', () => {
@@ -5020,7 +5150,7 @@ describe('a war', () => {
     // hall with men in it to fill the gap from.
     const post = baseNear(sim, target.point, 6, 5, 9, BuildingType.WatchTower);
     holdIt(sim, post);
-    supply(sim, post, 20);
+    const store = supply(sim, post, 20);
 
     expect(sim.attack(PLAYER, target.point, 5).ok).toBe(true);
 
@@ -5031,11 +5161,14 @@ describe('a war', () => {
         .all()
         .filter((settler) => settler.homePost === post.id && AT_WAR.includes(settler.state)).length;
 
+    // Counted at the store, not at the post: a man walking back reserves his
+    // own place at the post, so its books rising is not a man being sent for.
+    // A man leaving the store is.
     let askedWhileOut = 0;
     for (let i = 0; i < 4000; i += 1) {
-      const before = post.garrisonRequested;
+      const before = garrisonStrength(store.garrison);
       sim.update();
-      if (post.garrisonRequested > before && stillOut() > 0) askedWhileOut += 1;
+      if (garrisonStrength(store.garrison) < before && stillOut() > 0) askedWhileOut += 1;
       if (stillOut() === 0 && atWar(sim).length === 0) break;
     }
 
@@ -5253,23 +5386,85 @@ describe('a war', () => {
     expect(sim.population(RIVAL)).toBeGreaterThanOrEqual(before - 12);
 
     // They walk out of it: every one of them is standing on the door the tick
-    // it comes down, with his first step in front of him. Nobody is put on the
-    // ground beside it, any more than anybody else in this game is.
+    // it comes down. Nobody is put on the ground beside it, any more than
+    // anybody else in this game is.
     const turnedOut = out.filter((settler) => settler.profession === Profession.Helper);
     expect(turnedOut.length).toBeGreaterThanOrEqual(inside);
     for (const settler of turnedOut) {
       expect(settler.point).toBe(theirs.point);
       expect(settler.fromPoint).toBe(theirs.point);
+    }
+
+    // The ring holds six; the first six out have a step of their own in front
+    // of them and the rest crowd the doorstep until they can move off.
+    const stepping = turnedOut.filter((settler) => settler.toPoint !== theirs.point);
+    expect(stepping.length).toBeGreaterThan(0);
+    for (const settler of stepping) {
       expect(sim.world.grid.distance(settler.toPoint, theirs.point)).toBe(1);
     }
 
-    // And they are going somewhere: to another store of their own if the rival
-    // has one left, and wandering if he has not.
-    const going = out.filter(
-      (settler) =>
-        settler.state === SettlerState.ReturningToStore || settler.state === SettlerState.Lost,
+    // And they are going somewhere: the hall was the rival's only store, so
+    // there is nowhere of his own left to walk to and every one of them is
+    // wandering. Nobody is sent home to the wreck he has just walked out of.
+    for (const settler of turnedOut) {
+      expect(settler.state).toBe(SettlerState.Lost);
+      expect(settler.building).toBe(0);
+    }
+
+    // They scatter, and their time runs out: within a couple of hundred ticks
+    // most are clear of the ruin, and none of them is left standing on it —
+    // which is what they used to do until they were struck off one by one.
+    for (let i = 0; i < 200; i += 1) sim.update();
+    const still = sim.settlers.all().filter((settler) => settler.owner === RIVAL);
+    const onTheSpot = still.filter(
+      (settler) => sim.world.grid.distance(settler.point, theirs.point) <= 1,
     );
-    expect(going.length).toBeGreaterThanOrEqual(inside);
+    expect(onTheSpot.length).toBeLessThan(turnedOut.length / 2);
+
+    for (let i = 0; i < 400; i += 1) sim.update();
+    expect(sim.settlers.all().filter((settler) => settler.owner === RIVAL)).toHaveLength(0);
+  });
+
+  it('loses a man whose store goes while he is walking to it', () => {
+    const sim = contested();
+    const theirs = sim.buildings.require(sim.players[1]!.headquarters);
+
+    // A man of the rival's on his way home to his only store, a step from the
+    // door.
+    const walker = sim.settlers.add((id) => ({
+      id,
+      owner: RIVAL,
+      profession: Profession.Helper,
+      rank: Rank.Private,
+      state: SettlerState.ReturningToStore,
+      building: theirs.id,
+      point: theirs.flagPoint,
+      fromPoint: theirs.flagPoint,
+      toPoint: theirs.flagPoint,
+      path: [theirs.point],
+      pathIndex: 0,
+      stepProgress: 0,
+      stepLength: 8,
+      taskPoint: theirs.point,
+      taskTimer: 0,
+      homePost: 0,
+      carrying: null,
+      carryDestination: 0,
+      road: 0,
+      surveyFrom: 0,
+    }));
+
+    reachIn(sim).destroyBuilding(theirs);
+    expect(sim.buildings.get(theirs.id)).toBeUndefined();
+
+    // He walks the last step, finds nothing there and nothing of his own
+    // anywhere else — and wanders rather than being struck off on the doorstep.
+    for (let i = 0; i < 40 && sim.settlers.get(walker.id) === walker; i += 1) {
+      sim.update();
+      if (walker.state === SettlerState.Lost) break;
+    }
+    expect(sim.settlers.get(walker.id)).toBe(walker);
+    expect(walker.state).toBe(SettlerState.Lost);
   });
 
   it('takes one post, not the whole province behind it', () => {

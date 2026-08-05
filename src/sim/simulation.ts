@@ -824,11 +824,18 @@ export class Simulation {
   /**
    * The next node back along a queue of attackers.
    *
-   * A man walks out along the men already standing to the end of the queue,
-   * and takes the next place past it: following an occupied node beats
-   * anything, holding the heading beats turning, and leaving the flag at all is
-   * done by whichever way leads furthest from the walls. So the queue is one
-   * line trailing back from the fight rather than a ring around it.
+   * A man walks out along the men already standing to the end of the queue and
+   * takes the next place past it. Following an occupied node beats everything,
+   * because the line on the ground *is* the line; after that the line **turns
+   * one notch** from the way it came, which on a six-sided lattice draws an
+   * arc. Holding the heading comes next, and among places that are otherwise
+   * equal, whichever is furthest from the walls.
+   *
+   * A step back towards the building is refused outright, so the queue always
+   * leads away from the fight before it begins to bend. What it draws is a body
+   * of men curving round the place they are besieging, rather than the arrow
+   * straight tail a fixed heading gave — which read as a parade rather than a
+   * siege, and pointed off across country whatever the ground was doing.
    */
   private nextInLine(
     target: Building,
@@ -838,7 +845,11 @@ export class Simulation {
     line: ReadonlySet<number>,
   ): { point: number; direction: Direction } | undefined {
     const ON_THE_LINE = 1000;
+    const ROUND_THE_WALLS = 200;
     const STRAIGHT_ON = 100;
+
+    const here = this.world.grid.distance(target.point, from);
+    const turned = heading === undefined ? undefined : (((heading + 1) % 6) as Direction);
 
     let best: { point: number; direction: Direction } | undefined;
     let bestScore = -1;
@@ -849,10 +860,14 @@ export class Simulation {
       if (this.world.building[point] !== 0) continue;
       if (!this.world.isWalkable(point)) continue;
 
+      const away = this.world.grid.distance(target.point, point);
+      if (away < here) continue;
+
       const score =
         (taken.has(point) ? ON_THE_LINE : 0) +
+        (direction === turned ? ROUND_THE_WALLS : 0) +
         (direction === heading ? STRAIGHT_ON : 0) +
-        this.world.grid.distance(target.point, point);
+        away;
       if (score <= bestScore) continue;
 
       best = { point, direction };
@@ -966,7 +981,9 @@ export class Simulation {
   private arriveAtTheFight(settler: Settler): void {
     const target = this.buildings.get(settler.building);
     if (!target || target.owner === settler.owner || !isAttackable(target)) {
-      this.sendHome(settler);
+      // Nothing to fight: back to his own post, and only to a store if it will
+      // not have him.
+      this.goBackToPost(settler);
       return;
     }
 
@@ -1173,7 +1190,10 @@ export class Simulation {
       // so "the building he set out for" can even be somebody else's building
       // entirely by the time he arrives.
       if (!target || !isAttackable(target) || target.owner === party[0]!.owner) {
-        for (const attacker of party) this.sendHome(attacker);
+        // Back to the post he marched out of, which is where a man expects to
+        // end up when the fight he set out for is over before he gets there.
+        // `goBackToPost` falls through to a store if it has no room for him.
+        for (const attacker of party) this.goBackToPost(attacker);
         continue;
       }
 
@@ -1200,8 +1220,16 @@ export class Simulation {
           target.defenderDelay -= 1;
           continue;
         }
+        // Nothing happens at a building until somebody is standing on its flag.
+        // A garrison does not turn out because an attack has been *ordered* —
+        // it turns out because there is a man at the door, and until then the
+        // men marching up are somebody else's business. Counting them was what
+        // put a defender on the step sixty ticks before anybody could reach
+        // him.
+        if (!this.manAtTheFlag(arrived)) continue;
+
         if (garrisonStrength(target.garrison) <= 0) {
-          if (arrived.length > 0) this.captureBuilding(target, arrived);
+          this.captureBuilding(target, arrived);
           continue;
         }
         this.sendOutDefender(target);
@@ -1922,7 +1950,6 @@ export class Simulation {
       if (flag && flag.building === building.id) flag.building = 0;
     }
 
-    this.turnEverybodyOut(building);
     // Ids are recycled, so a stale entry here would quietly over-man whatever
     // building is created next.
     this.frontierPosts.delete(building.id);
@@ -1931,7 +1958,15 @@ export class Simulation {
     // home, or they would circle forever.
     this.retargetWaresBoundFor(building.id);
 
+    // Off the books before anybody is turned out of it. A store is a place its
+    // own people can be sent home to, and while it was still in the table the
+    // hall being pulled down was the nearest store to every one of the
+    // thirty-nine standing in it: they walked one node, found nothing there,
+    // and were struck off. The object outlives the removal, so its door, its
+    // flag, its garrison and its reserve are all still there to be emptied.
     this.buildings.remove(building.id);
+
+    this.turnEverybodyOut(building);
 
     // The ground it held is worked out again now it is gone — from the other
     // buildings, so a neighbouring post keeps what it covers. Without this a
@@ -3025,7 +3060,10 @@ export class Simulation {
 
     const other = this.nearestStore(settler.owner, settler.point);
     if (!other) {
-      this.settlers.remove(settler.id);
+      // Not a soul of his own left with a door: he is not struck off where he
+      // stands, any more than he is in `sendHome`. He wanders, and his time
+      // runs out — a province is seen emptying rather than subtracted.
+      this.loseHim(settler);
       return;
     }
 
