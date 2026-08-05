@@ -56,6 +56,8 @@ export class GameSession {
   private notice: string | null = null;
   private noticeFrames = 0;
   private autosaving = false;
+  /** The war has been declared over and the panel put up, once. */
+  private warSettled = false;
 
   constructor(root: HTMLElement, simulation: Simulation, playerId: number, onQuit: () => void) {
     this.root = root;
@@ -145,44 +147,48 @@ export class GameSession {
   private step(): void {
     this.simulation.update();
 
-    if (this.simulation.winner !== 0) {
-      this.endTheWar();
-      return;
-    }
+    if (this.simulation.winner !== 0 && !this.warSettled) this.endTheWar();
 
     if (this.simulation.tick % AUTOSAVE_INTERVAL === 0) void this.autosave();
   }
 
   /**
-   * The war is decided: stop the clock and say so over the map.
+   * The war is decided: say so over the map, and let the map go on.
    *
-   * The map stays underneath rather than being cleared — a player wants to look
-   * at what he won or lost — and the only way on is back to the title, since
-   * there is nothing left to do here.
+   * The clock is not stopped. A province whose hall has fallen empties in front
+   * of the player — his men are lost, they wander, and they go — and that is
+   * worth watching rather than freezing. Whoever won can also put the panel
+   * away and carry on: the loser's outposts are still standing, and taking them
+   * is a perfectly good thing to spend an evening on.
    */
   private endTheWar(): void {
-    this.loop.stop();
+    this.warSettled = true;
 
     const won = this.simulation.winner === this.playerId;
     const winner = this.simulation.players.find(
       (player) => player.id === this.simulation.winner,
     );
 
-    this.hudRoot.append(
+    const panel = el(
+      'div',
+      { class: 'ending' },
+      el('h2', { class: 'ending__title' }, won ? 'The province is yours' : 'Your province has fallen'),
+      el(
+        'p',
+        { class: 'ending__note' },
+        won
+          ? 'Every rival headquarters has been thrown down.'
+          : `${winner?.name ?? 'Your rival'} took your headquarters.`,
+      ),
       el(
         'div',
-        { class: 'ending' },
-        el('h2', { class: 'ending__title' }, won ? 'The province is yours' : 'Your province has fallen'),
-        el(
-          'p',
-          { class: 'ending__note' },
-          won
-            ? 'Every rival headquarters has been thrown down.'
-            : `${winner?.name ?? 'Your rival'} took your headquarters.`,
-        ),
+        { class: 'ending__actions' },
+        button('Keep playing', 'ending__action', () => panel.remove()),
         button('Back to the title', 'ending__action', () => this.onQuit()),
       ),
     );
+
+    this.hudRoot.append(panel);
   }
 
   private draw(alpha: number): void {

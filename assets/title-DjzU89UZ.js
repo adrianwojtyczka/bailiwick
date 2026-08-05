@@ -1,4 +1,4 @@
-import{_ as e,a as t,c as n,m as r,n as i,o as a,r as o,s,t as c,v as l}from"./dom-ykj79K_w.js";var u=`<svg class="crest" viewBox="0 0 48 48" aria-hidden="true">
+import{_ as e,a as t,c as n,m as r,n as i,o as a,r as o,s,t as c,v as l}from"./dom-jnKDznc1.js";var u=`<svg class="crest" viewBox="0 0 48 48" aria-hidden="true">
       <path d="M24 2 44 9v18c0 11-8.5 17.5-20 21C12.5 44.5 4 38 4 27V9z" fill="#c4832b" stroke="#8a5a17" stroke-width="2" stroke-linejoin="round"/>
       <path d="M24 12 34 19v13H14V19z" fill="#f4e8ce"/>
       <rect x="20" y="24" width="8" height="8" fill="#9c4128"/>

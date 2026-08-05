@@ -324,6 +324,17 @@
   line-height: 1.5;
 }
 
+/**
+ * Two ways on: put the panel away and go on playing, or leave for the title.
+ * They wrap on a narrow phone rather than being squeezed side by side.
+ */
+.ending__actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.5rem;
+}
+
 .ending__action {
   @include tappable;
 
