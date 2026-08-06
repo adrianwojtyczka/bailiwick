@@ -5,7 +5,7 @@ import { Simulation } from '../sim/simulation';
 import { planRoad } from '../sim/transport/pathfinding';
 import { BuildSpace, canHostSize, evaluateBuildSpace } from '../sim/world/buildspace';
 import { MapObject } from '../sim/world/terrain';
-import { garrisonStrength, Rank, RANK_COUNT } from '../sim/data/ranks';
+import { garrisonStrength, Rank } from '../sim/data/ranks';
 import { decodeSave, encodeSave, loadSimulation } from './save';
 
 const PLAYER = 1;
@@ -141,27 +141,14 @@ describe('saving and loading', () => {
   });
 });
 
-describe('saves from an older version', () => {
-  /** Rewrites a current save as a version 1 file, dropping what v1 lacked. */
-  async function asVersionOne(bytes: Uint8Array): Promise<Uint8Array> {
+describe('saves from another version', () => {
+  /** Rewrites a save's version number, leaving everything else alone. */
+  async function asVersion(bytes: Uint8Array, version: number): Promise<Uint8Array> {
     const stream = new Blob([bytes as BlobPart])
       .stream()
       .pipeThrough(new DecompressionStream('gzip'));
     const parsed = JSON.parse(await new Response(stream).text()) as Record<string, unknown>;
-
-    parsed.version = 1;
-    delete parsed.growingFields;
-    const settlers = parsed.settlers as { items: Record<string, unknown>[] };
-    for (const settler of settlers.items) {
-      delete settler.surveyFrom;
-      delete settler.rank;
-    }
-    const buildings = parsed.buildings as { items: Record<string, unknown>[] };
-    for (const building of buildings.items) {
-      delete building.garrison;
-      delete building.garrisonRequested;
-      delete building.exhaustedFor;
-    }
+    parsed.version = version;
 
     const out = new Blob([JSON.stringify(parsed)])
       .stream()
@@ -169,45 +156,21 @@ describe('saves from an older version', () => {
     return new Uint8Array(await new Response(out).arrayBuffer());
   }
 
-  it('still loads, filling in what the older format left out', async () => {
-    const original = playedGame();
-    const old = await asVersionOne(await encodeSave(original, 'an old game'));
-
-    const restored = await loadSimulation(old);
-
-    // Everything the old format did carry survives intact.
-    expect(restored.tick).toBe(original.tick);
-    expect(restored.settlers.count).toBe(original.settlers.count);
-    expect(restored.storedWare(PLAYER, Ware.Board)).toBe(
-      original.storedWare(PLAYER, Ware.Board),
-    );
-    // And the fields it predates default to nothing rather than to undefined.
-    for (const settler of restored.settlers.all()) {
-      expect(settler.surveyFrom).toBe(0);
-      expect(settler.rank).toBe(0);
-    }
-
-    // A save older than soldiers has no army — but a store still needs a
-    // garrison of the right shape, or the first man trained goes nowhere.
-    const home = restored.buildings.require(restored.players[0]!.headquarters);
-    expect(home.garrison).toHaveLength(RANK_COUNT);
-    expect(garrisonStrength(home.garrison)).toBe(0);
-    expect(home.garrisonRequested).toBe(0);
+  /**
+   * This used to assert the opposite — that a version 1 file still opened, with
+   * the fields it predated defaulted in. It cannot any more, and the reason is
+   * worth stating: a save carries its *seed*, not its ground, and at version 10
+   * a seed stopped meaning the same island. Opening such a file would stand its
+   * halls in the sea. So the rule that only newer saves are refused now has a
+   * floor under it, and this test watches the floor.
+   */
+  it('refuses a save made before the map was doubled and mirrored', async () => {
+    const old = await asVersion(await encodeSave(playedGame(), 'an old game'), 9);
+    await expect(loadSimulation(old)).rejects.toThrow(/no longer exists/);
   });
 
   it('refuses a save from a newer version it cannot understand', async () => {
-    const bytes = await encodeSave(playedGame(), 'from the future');
-    const stream = new Blob([bytes as BlobPart])
-      .stream()
-      .pipeThrough(new DecompressionStream('gzip'));
-    const parsed = JSON.parse(await new Response(stream).text()) as Record<string, unknown>;
-    parsed.version = 999;
-
-    const out = new Blob([JSON.stringify(parsed)])
-      .stream()
-      .pipeThrough(new CompressionStream('gzip'));
-    const future = new Uint8Array(await new Response(out).arrayBuffer());
-
+    const future = await asVersion(await encodeSave(playedGame(), 'from the future'), 999);
     await expect(loadSimulation(future)).rejects.toThrow(/newer version/);
   });
 });

@@ -23,8 +23,16 @@ import { GameSession } from './session';
  *     moment, kept so that a reload raises the same island rather than another.
  */
 
-/** A map this size generates in a fraction of a second and gives room to grow. */
-const MAP_SIZE = 96;
+/**
+ * Twice as wide as it is tall, and mirrored down the middle: the western half
+ * is the eastern half turned about, so the two players are dealt the same
+ * country and the ground between them is one island they can march across.
+ *
+ * Still a fraction of a second to generate — around a sixth, measured over
+ * twelve seeds — which a phone can spend on the loading message.
+ */
+const MAP_WIDTH = 192;
+const MAP_HEIGHT = 96;
 const HUMAN_PLAYER = 1;
 
 /** Where the title screen lives, relative to this page. */
@@ -104,8 +112,8 @@ async function startNewGame(seed: number, named: boolean): Promise<void> {
   try {
     startSession(
       Game.create({
-        width: MAP_SIZE,
-        height: MAP_SIZE,
+        width: MAP_WIDTH,
+        height: MAP_HEIGHT,
         seed,
         players: [
           { name: 'You', colour: '#c4832b' },

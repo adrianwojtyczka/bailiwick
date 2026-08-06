@@ -29,6 +29,13 @@ GitHub Pages serves it directly and no build step is needed to play.
   uploaded anywhere.
 - `?seed=12345` in the URL generates a specific island, so a map can be shared
   or revisited exactly.
+- Every island is **the same country twice**: one long map, its eastern half the
+  western half turned half a turn about the middle. You open in the west and the
+  rival in the east, with identical ground, identical woods and identical ore —
+  and one continuous island between you to march across.
+- Every start has **a mountain with iron and coal in reach**, about a dozen
+  nodes of each, a short expansion from the door. Where an island has a range of
+  its own it keeps it; where it has none, one is raised.
 
 ### Getting started in the game
 
@@ -38,10 +45,16 @@ works granite outcrops. Connect each new building to the network with a road, or
 nothing will ever reach it. Pair every woodcutter with a forester, or the woods
 around it will be gone within the hour.
 
-There is a rival on the island, holding a province of his own behind a ring of
-outposts. He will not come for you, but the ore you need is as likely to be
-under his ground as yours — so a barracks on the frontier, and eventually the
-swords, shields and beer to fill it, is how a province keeps growing.
+There is a rival at the far end of the island, holding a province of his own
+behind a ring of outposts — and, since the map is mirrored, holding exactly what
+you hold. He will not come for you. But he is a hundred nodes away, and the
+ground between is worth having, so a barracks on the frontier, and eventually
+the swords, shields and beer to fill it, is how a province keeps growing.
+
+Your mountain is a dozen or so nodes out, past the levelled apron the hall
+stands on. Send a geologist from a flag near it: he marks what he finds, and a
+coal mine and an iron mine on those marks — fed with bread, and eventually
+meat — are what turn granite and ore into swords.
 
 ## Development
 
@@ -88,6 +101,16 @@ why roads, slopes and building sites behave the way they do.
 **Terrain is baked into chunk canvases** and blitted, so panning costs a handful
 of image copies rather than redrawing a hundred thousand triangles. The renderer
 sits behind an interface, leaving room for a WebGL terrain layer later.
+
+**Both players are dealt the same country.** The map is one lattice turned half
+a turn onto itself — the only transformation of this geometry that maps every
+point to a point and every step to a step. It is not a copy stamped onto a
+blank half, though: heights and terrain are *generated* symmetric, by blending
+each noise field with its own reflection, because a stamp would leave a cliff
+down the join. Trees, stone and ore, which are one thing to a node and have no
+join to show, are stamped. What that buys is a guarantee rather than a hope —
+every height, every triangle and every seam on one side has an exact twin on the
+other, which a test asserts point by point.
 
 **A border is pressure, not a patch.** Ground is derived afresh from the
 buildings that hold it, never painted on when one is raised or flipped when one

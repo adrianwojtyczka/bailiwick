@@ -1,4 +1,4 @@
-import { SAVE_VERSION } from '../sim/save-version';
+import { OLDEST_SAVE_VERSION, SAVE_VERSION } from '../sim/save-version';
 
 /**
  * The save file's outer layer: gzip, base64, and the header on the front.
@@ -74,12 +74,19 @@ export async function gunzip(bytes: Uint8Array): Promise<string> {
  * Refuses a save this build cannot read.
  *
  * Older saves are read on purpose — the simulation fills in whatever they
- * predate. A save from a *newer* version is the one that genuinely cannot be
- * opened, because there is no telling what it left out.
+ * predate — but only back as far as `OLDEST_SAVE_VERSION`. A save from a
+ * *newer* version cannot be opened because there is no telling what it left
+ * out; one from before the map changed cannot be opened because its island is
+ * no longer where it was.
  */
 export function checkVersion(version: number): void {
   if (version > SAVE_VERSION) {
     throw new Error(`This save was made by a newer version of Bailiwick (${version}).`);
+  }
+  if (version < OLDEST_SAVE_VERSION) {
+    throw new Error(
+      `This save (${version}) was made before the map was doubled and mirrored, and its island no longer exists.`,
+    );
   }
 }
 

@@ -53,6 +53,32 @@ const START_TREES = 20;
 const START_OUTCROPS = 4;
 
 /**
+ * A range is raised near every start, because most islands have no mountain.
+ *
+ * Counted over sixteen seeds, six in eight carried no ore at all and four no
+ * mineable rock whatever: `generateHeights` has to lift its blended noise clear
+ * of `MOUNTAIN_LEVEL`, and `findDeepRock` then wants a solid nineteen-node blob
+ * before any of it will hold ore. The two rarities multiply, and an island with
+ * a few crags gets nothing. So the shortfall is planted, exactly as
+ * `stockStartArea` plants wood and stone — an island with a real range of its
+ * own keeps it and nothing is raised.
+ */
+const RANGE_MIN_DISTANCE = 14;
+const RANGE_MAX_DISTANCE = 18;
+
+/** Solid rock out to here, and easing back to the natural ground beyond it. */
+const RANGE_RADIUS = 6;
+const RANGE_SKIRT = 5;
+
+/** How far from a start the guarantee is counted, and what counts as enough. */
+const ORE_REACH = 24;
+const RANGE_MIN_ROCK = 24;
+
+/** Nodes of each a start is guaranteed. A mine works one node and exhausts it. */
+const START_IRON = 12;
+const START_COAL = 12;
+
+/**
  * Where anything planted to make up the shortfall goes: out of the apron, in
  * from the frontier, and near enough that a hut sited on the doorstep still
  * reaches it.
@@ -116,22 +142,78 @@ function fractalNoise(
   return sum / total;
 }
 
+// ------------------------------------------------------------ the mirror
+
+/**
+ * The share of the map's width over which the two halves' noise is blended.
+ *
+ * Out at either rim the blend does nothing and the noise comes through at its
+ * full contrast, so each homeland looks as an unmirrored island always did;
+ * across the middle third the two fields cross over. That crossing is what
+ * makes the map one continuous country rather than a copy stitched to an
+ * original down a visible seam.
+ */
+const MIRROR_BLEND = 0.35;
+
+/**
+ * Samples a noise field so that a point and its mirror always come out with the
+ * same number.
+ *
+ * The two halves are one lattice turned half a turn, so every point belongs to
+ * a *pair*. This resolves the pair first — western member, eastern member — and
+ * then does exactly the same arithmetic in exactly the same order whichever
+ * member it was asked about. Blending "my noise with my mirror's" would be
+ * symmetric on paper and off by a rounding in practice, which over eighteen
+ * thousand points is a handful of nodes where one player's ground is a
+ * millimetre higher than the other's. This way the halves match to the bit.
+ *
+ * Continuous, too: at the middle the pair's two members swap roles just as the
+ * blend reaches an even share of each, and an even share reads the same from
+ * both sides.
+ */
+function foldedNoise(
+  grid: MapGrid,
+  seed: number,
+  wx: number,
+  wy: number,
+  octaves: number,
+  frequency: number,
+): number {
+  const mx = grid.width - 0.5 - wx;
+  const my = grid.height - 1 - wy;
+
+  const west = wx < mx || (wx === mx && wy < my);
+  const nx = west ? wx : mx;
+  const ny = west ? wy : my;
+  const fx = west ? mx : wx;
+  const fy = west ? my : wy;
+
+  const u = nx / (grid.width - 0.5);
+  const share = smoothstep(Math.max(0, Math.min(1, (u - 0.5) / MIRROR_BLEND + 0.5)));
+
+  return (
+    fractalNoise(seed, nx, ny, octaves, frequency) * (1 - share) +
+    fractalNoise(seed, fx, fy, octaves, frequency) * share
+  );
+}
+
 // ------------------------------------------------------------- generation
 
 function generateHeights(world: World, seed: number): void {
   const { grid } = world;
-  const centreX = grid.width / 2;
-  const centreY = grid.height / 2;
-  const maxRadius = Math.min(centreX, centreY);
+  // The centre of the *mirror*, not of the array: a point and its opposite
+  // straddle it exactly, so the falloff below comes out identical for both.
+  const centreX = (grid.width - 0.5) / 2;
+  const centreY = (grid.height - 1) / 2;
 
   for (let index = 0; index < grid.size; index += 1) {
     const wx = grid.worldX(index);
     const wy = grid.worldY(index);
 
-    const base = fractalNoise(seed, wx, wy, 5, 0.035);
+    const base = foldedNoise(grid, seed, wx, wy, 5, 0.035);
     // A second, much broader field raises whole highland regions, so mountains
     // form connected ranges worth prospecting rather than isolated pimples.
-    const ridges = fractalNoise(seed ^ 0x5bf03635, wx, wy, 3, 0.012);
+    const ridges = foldedNoise(grid, seed ^ 0x5bf03635, wx, wy, 3, 0.012);
 
     // Value noise clusters around its mean, which would leave the map an
     // unbroken plain. Stretching the middle of the range outwards is what
@@ -143,9 +225,11 @@ function generateHeights(world: World, seed: number): void {
     const shaped = Math.max(0, Math.min(1.1, (land - 0.25) / 0.54));
 
     // Push the map's rim below sea level so the playable area is an island and
-    // the edge of the world can never be reached.
-    const dx = (wx - centreX) / maxRadius;
-    const dy = (wy - centreY) / maxRadius;
+    // the edge of the world can never be reached. Each axis is measured against
+    // its own half-width, so a map twice as wide as it is tall drowns its ends
+    // rather than everything outside a circle that would fit inside it.
+    const dx = (wx - centreX) / centreX;
+    const dy = (wy - centreY) / centreY;
     const radial = Math.min(1, Math.sqrt(dx * dx + dy * dy));
     const falloff = smoothstep(Math.max(0, Math.min(1, (radial - 0.7) / 0.28)));
 
@@ -168,7 +252,11 @@ function terrainForTriangle(
   const { grid } = world;
   const wx = (grid.worldX(a) + grid.worldX(b) + grid.worldX(c)) / 3;
   const wy = (grid.worldY(a) + grid.worldY(b) + grid.worldY(c)) / 3;
-  const moisture = fractalNoise(seed ^ 0x1d872b41, wx, wy, 4, 0.05);
+  // Folded like the heights are. Under the half-turn a triangle's three corners
+  // become the three corners of its opposite number, so their mean height is
+  // already the same on both sides; folding the moisture too is what makes the
+  // terrain itself match without a single value being copied across.
+  const moisture = foldedNoise(grid, seed ^ 0x1d872b41, wx, wy, 4, 0.05);
 
   if (height < BEACH_LEVEL) return Terrain.Desert;
 
@@ -454,24 +542,50 @@ function scoreStartSite(world: World, point: number): number {
   return openGround + Math.min(trees, 25) * 2 + Math.min(stone, 12) * 3;
 }
 
-function findStartPoints(world: World, players: number): number[] {
-  const { grid } = world;
-  const candidates: { point: number; score: number }[] = [];
+/**
+ * Every start site sits in the western third of the map, and its opposite
+ * number in the eastern third.
+ *
+ * A site is only ever chosen on the near half — the far half is that half
+ * turned about — so without this a pair could be picked either side of the
+ * middle and the two players would open a dozen nodes apart with the whole
+ * island empty behind them. The outer thirds are the homelands; the middle
+ * third, which is also where the two noise fields cross over, is the ground
+ * they meet on.
+ */
+const HOMELAND_THIRD = 3;
 
-  // A coarse scan is plenty: good sites come in patches, not single points.
-  for (let y = 6; y < grid.height - 6; y += 2) {
-    for (let x = 6; x < grid.width - 6; x += 2) {
-      const point = grid.index(x, y);
-      const score = scoreStartSite(world, point);
-      if (score > 0) candidates.push({ point, score });
+/**
+ * Sites for half the players, all in the west; the other half are these turned
+ * about. Odd player counts round up, so the extra site's opposite number goes
+ * unused rather than leaving one player without one.
+ */
+function findStartPairs(world: World, pairs: number): number[] {
+  const { grid } = world;
+
+  const scan = (limit: number): { point: number; score: number }[] => {
+    const found: { point: number; score: number }[] = [];
+    // A coarse scan is plenty: good sites come in patches, not single points.
+    for (let y = 6; y < grid.height - 6; y += 2) {
+      for (let x = 6; x < limit; x += 2) {
+        const point = grid.index(x, y);
+        const score = scoreStartSite(world, point);
+        if (score > 0) found.push({ point, score });
+      }
     }
-  }
+    return found;
+  };
+
+  // The homeland first; a cramped map may have nothing settleable there, and a
+  // start anywhere on its own half beats no island at all.
+  let candidates = scan(Math.floor(grid.width / HOMELAND_THIRD));
+  if (candidates.length < pairs) candidates = scan(grid.width >> 1);
 
   candidates.sort((a, b) => b.score - a.score || a.point - b.point);
 
   const chosen: number[] = [];
   for (const candidate of candidates) {
-    if (chosen.length >= players) break;
+    if (chosen.length >= pairs) break;
     const farEnough = chosen.every(
       (existing) => grid.distance(existing, candidate.point) >= MIN_PLAYER_SEPARATION,
     );
@@ -479,15 +593,15 @@ function findStartPoints(world: World, players: number): number[] {
   }
 
   // Relax the separation rather than fail outright on a cramped map.
-  if (chosen.length < players) {
+  if (chosen.length < pairs) {
     for (const candidate of candidates) {
-      if (chosen.length >= players) break;
+      if (chosen.length >= pairs) break;
       if (!chosen.includes(candidate.point)) chosen.push(candidate.point);
     }
   }
 
-  if (chosen.length < players) {
-    throw new Error(`could not find ${players} viable starting positions on this map`);
+  if (chosen.length < pairs) {
+    throw new Error(`could not find ${pairs} viable starting positions on this map`);
   }
 
   return chosen;
@@ -593,6 +707,241 @@ function stockStartArea(world: World, point: number, seed: number): void {
 }
 
 /**
+ * Where to put a range for a start that has none, or nothing if the island
+ * already carries one.
+ *
+ * The band it is chosen from is a short expansion away — outside the levelled
+ * apron, and about one outpost out — so the ore is something to reach for
+ * rather than something on the doorstep. Within the band the highest natural
+ * ground wins, so the range grows out of a rise the island already had instead
+ * of standing on the flat like a wart.
+ */
+function rangeSiteFor(
+  world: World,
+  start: number,
+  deep: Uint8Array,
+): { readonly point: number; readonly radius: number } | undefined {
+  const { grid } = world;
+
+  let rock = 0;
+  for (const point of grid.pointsWithin(start, ORE_REACH)) rock += deep[point]!;
+  if (rock >= RANGE_MIN_ROCK) return undefined;
+
+  const look = (radius: number, near: number, out: number): number | undefined => {
+    let best: number | undefined;
+    let bestScore = -1;
+
+    for (const point of grid.pointsWithin(start, out)) {
+      if (grid.distance(start, point) < near) continue;
+
+      let score = 0;
+      let room = true;
+      for (const candidate of grid.pointsWithin(point, radius)) {
+        // Filling in a bay to make a mountain would take the coast with it, and
+        // a range half off the map is half a range.
+        if (world.height[candidate]! < SEA_LEVEL || !isInterior(world, candidate)) {
+          room = false;
+          break;
+        }
+        score += world.height[candidate]!;
+      }
+      if (!room) continue;
+
+      if (score > bestScore) {
+        bestScore = score;
+        best = point;
+      }
+    }
+
+    return best;
+  };
+
+  // A full range, a short walk out, is what a start ought to get. Some islands
+  // are a spit of land with a third of the ground about the start above water,
+  // and there a smaller range, nearer or further, beats no ore at all — so the
+  // search gives way on size first and then on where it will look, stopping
+  // only where the ore would fall outside what the guarantee is counted over.
+  for (let radius = RANGE_RADIUS; radius >= RANGE_RADIUS - 2; radius -= 1) {
+    const point = look(radius, RANGE_MIN_DISTANCE, RANGE_MAX_DISTANCE);
+    if (point !== undefined) return { point, radius };
+  }
+  for (let radius = RANGE_RADIUS; radius >= RANGE_RADIUS - 2; radius -= 1) {
+    const point = look(radius, START_FLATTEN_RADIUS + radius, ORE_REACH - 3);
+    if (point !== undefined) return { point, radius };
+  }
+
+  return undefined;
+}
+
+/**
+ * Raises a mountain, and the same mountain on the other half.
+ *
+ * The plateau is held between the mountain line and the snow line, since snow
+ * is not mineable, and roughened a little so it does not read as a cake. The
+ * skirt eases back to the natural ground over five nodes — two or three units a
+ * node, well inside what a road can climb, because a range a mine cannot be
+ * roaded to is no use to anybody.
+ *
+ * Nothing within a start's own levelled apron is touched, whichever start it
+ * belongs to, so the opening moves stay on the flat ground they were promised.
+ */
+function raiseARange(
+  world: World,
+  range: { readonly point: number; readonly radius: number },
+  starts: readonly number[],
+  seed: number,
+): void {
+  const { grid } = world;
+
+  for (const middle of [range.point, grid.mirrored(range.point)]) {
+    for (const point of grid.pointsWithin(middle, range.radius + RANGE_SKIRT)) {
+      if (starts.some((start) => grid.distance(start, point) <= START_FLATTEN_RADIUS + 1)) {
+        continue;
+      }
+
+      const rough = foldedNoise(grid, seed ^ 0x2b1f5c07, grid.worldX(point), grid.worldY(point), 2, 0.12);
+      const peak = MOUNTAIN_LEVEL + 2 + rough * 4;
+
+      const away = grid.distance(middle, point);
+      const natural = world.height[point]!;
+      const target =
+        away <= range.radius
+          ? peak
+          : peak + (natural - peak) * smoothstep((away - range.radius) / (RANGE_SKIRT + 1));
+
+      world.height[point] = Math.max(natural, Math.min(HEIGHT_SCALE, Math.round(target)));
+    }
+  }
+}
+
+/**
+ * Lays a seam of one ore through the rock nearest a start.
+ *
+ * Grown outwards from a single node rather than sprinkled, so a geologist's
+ * find still tells the player something about the ridge he is standing on. An
+ * island's own rock comes in patches, though, and the nearest patch is often
+ * smaller than a seam — so when one runs out the seam picks up again at the
+ * next nearest rock rather than stopping short of what was promised.
+ */
+function laySeam(
+  world: World,
+  rock: readonly number[],
+  taken: Set<number>,
+  wanted: number,
+  resource: Resource,
+  rng: Rng,
+): void {
+  const available = new Set(rock.filter((point) => !taken.has(point)));
+  let left = wanted;
+
+  while (left > 0) {
+    const start = rock.find((point) => available.has(point));
+    if (start === undefined) return;
+
+    const queue = [start];
+    available.delete(start);
+
+    while (queue.length > 0 && left > 0) {
+      const point = queue.shift()!;
+      taken.add(point);
+      world.resource[point] = resource;
+      world.resourceAmount[point] = rng.nextRange(6, 24);
+      left -= 1;
+
+      for (const near of world.grid.pointsWithin(point, 1)) {
+        if (!available.has(near)) continue;
+        available.delete(near);
+        queue.push(near);
+      }
+    }
+  }
+}
+
+/**
+ * Makes sure a start has iron and coal in reach, on both halves at once.
+ *
+ * Ore is laid on the point and on its opposite number together, rather than
+ * left to the wholesale mirroring, because on a small map a start's reach can
+ * cross the middle and the stamp would rub half a seam out again.
+ *
+ * Granite and gold are left to the band noise: nice to have, never promised.
+ */
+function oreForTheRange(world: World, start: number, seed: number): void {
+  const { grid } = world;
+  const deep = findDeepRock(world);
+
+  const rock = grid
+    .pointsWithin(start, ORE_REACH)
+    .filter((point) => deep[point])
+    .sort((a, b) => grid.distance(start, a) - grid.distance(start, b) || a - b);
+
+  const count = (resource: Resource): number =>
+    rock.reduce((total, point) => total + (world.resource[point] === resource ? 1 : 0), 0);
+
+  const short = new Map<Resource, number>();
+  if (count(Resource.Iron) < START_IRON) short.set(Resource.Iron, START_IRON);
+  if (count(Resource.Coal) < START_COAL) short.set(Resource.Coal, START_COAL);
+  if (short.size === 0) return;
+
+  // What the island already has enough of is protected — but only up to what
+  // its own guarantee asks for, and only the nodes nearest the start. Two
+  // mistakes were made here in turn. Laying coal over every node of natural
+  // iron left a start with eighteen iron holding ten; then protecting *all* the
+  // iron on an island whose rock was almost entirely iron left nowhere to put
+  // the coal, and the start held five. Keeping a dozen and freeing the rest is
+  // what satisfies both.
+  const taken = new Set<number>();
+  for (const [resource, wanted] of [
+    [Resource.Iron, START_IRON],
+    [Resource.Coal, START_COAL],
+  ] as const) {
+    if (short.has(resource)) continue;
+    let kept = 0;
+    for (const point of rock) {
+      if (kept >= wanted) break;
+      if (world.resource[point] !== resource) continue;
+      taken.add(point);
+      kept += 1;
+    }
+  }
+
+  const rng = new Rng(seed ^ (start * 0x2545f491));
+  for (const [resource, wanted] of short) {
+    laySeam(world, rock, taken, wanted, resource, rng);
+  }
+
+  for (const point of taken) {
+    const opposite = grid.mirrored(point);
+    world.resource[opposite] = world.resource[point]!;
+    world.resourceAmount[opposite] = world.resourceAmount[point]!;
+  }
+}
+
+/**
+ * Stamps the western half of the map onto the eastern one.
+ *
+ * The ground itself needs no stamping — heights and terrain are made symmetric
+ * where they are generated, because a copied *surface* would leave a cliff down
+ * the join. Trees, stone and ore are another matter: they are laid down by an
+ * `Rng` walking the map in index order, which no amount of folded noise would
+ * make symmetric, and being one thing to a node they can be copied across
+ * without any seam to show for it.
+ */
+function mirrorHalf(world: World): void {
+  const { grid } = world;
+  const half = grid.width >> 1;
+
+  for (let index = 0; index < grid.size; index += 1) {
+    if (grid.xOf(index) >= half) continue;
+    const opposite = grid.mirrored(index);
+    world.object[opposite] = world.object[index]!;
+    world.objectData[opposite] = world.objectData[index]!;
+    world.resource[opposite] = world.resource[index]!;
+    world.resourceAmount[opposite] = world.resourceAmount[index]!;
+  }
+}
+
+/**
  * Builds a fresh island map from a seed.
  *
  * Generation is a pure function of the seed: the same seed always produces the
@@ -602,26 +951,44 @@ function stockStartArea(world: World, point: number, seed: number): void {
 export function generateWorld(options: WorldGenOptions): GeneratedWorld {
   const { width, height, seed, players } = options;
 
+  if ((height & 1) === 1) {
+    // The half-turn sends row `y` to row `height - 1 - y`. On an odd number of
+    // rows the middle row maps onto itself while keeping its half-step offset,
+    // and the lattice no longer lines up with its own reflection.
+    throw new Error(`a mirrored map needs an even height, received ${height}`);
+  }
+
   const grid = new MapGrid(width, height);
   const world = new World(grid);
 
   generateHeights(world, seed);
 
-  const startPoints = (() => {
-    // Terrain has to exist before sites can be judged, and the start areas have
-    // to be levelled before terrain is finalised — so terrain is derived twice.
-    generateTerrain(world, seed);
-    const points = findStartPoints(world, players);
-    for (const point of points) prepareStartArea(world, point);
-    generateTerrain(world, seed);
-    return points;
-  })();
+  // Terrain has to exist before sites can be judged, and the start areas have
+  // to be levelled before terrain is finalised — so terrain is derived twice.
+  generateTerrain(world, seed);
+
+  const pairs = findStartPairs(world, Math.ceil(players / 2));
+  // Both members of every pair, including the one an odd player count leaves
+  // unsettled: every deliberate edit to the ground has to land on both halves,
+  // or they stop being the same country and the tests that say so start lying.
+  const sites: number[] = [];
+  for (const point of pairs) sites.push(point, grid.mirrored(point));
+
+  for (const point of sites) prepareStartArea(world, point);
+
+  const rock = findDeepRock(world);
+  for (const point of pairs) {
+    const range = rangeSiteFor(world, point, rock);
+    if (range !== undefined) raiseARange(world, range, sites, seed);
+  }
+
+  generateTerrain(world, seed);
 
   generateObjects(world, seed);
   generateResources(world, seed);
 
   // The prepared start areas must stay clear even after object generation.
-  for (const point of startPoints) {
+  for (const point of sites) {
     for (const candidate of grid.pointsWithin(point, START_CLEAR_RADIUS)) {
       world.object[candidate] = MapObject.None;
       world.objectData[candidate] = 0;
@@ -629,9 +996,15 @@ export function generateWorld(options: WorldGenOptions): GeneratedWorld {
   }
 
   // Only once the apron is clear, so nothing planted can land back inside it.
-  for (const point of startPoints) stockStartArea(world, point, seed);
+  for (const point of pairs) stockStartArea(world, point, seed);
 
-  return { world, startPoints };
+  mirrorHalf(world);
+
+  // After the stamp, so a seam that reaches across the middle is not rubbed
+  // out again by it.
+  for (const point of pairs) oreForTheRange(world, point, seed);
+
+  return { world, startPoints: sites.slice(0, players) };
 }
 
 /** True when every neighbour of the point is inside the map. */

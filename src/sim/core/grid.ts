@@ -114,6 +114,27 @@ export class MapGrid {
     return { point: neighbour, direction: opposite(direction) };
   }
 
+  /**
+   * The point diametrically opposite this one: the half-turn about the centre
+   * of the map.
+   *
+   * This is the one transformation of an odd-r lattice that maps every point to
+   * a point and every step to a step — a true point reflection, since
+   * `worldX(p) + worldX(mirrored(p))` and `worldY(p) + worldY(mirrored(p))` are
+   * both constant. A plain east-west flip is *not*: it would send the eastward
+   * neighbour of an odd row to a point that is not a neighbour at all, and the
+   * mirrored half would not be the same country.
+   *
+   * It only holds when the height is even. On an odd number of rows the middle
+   * row maps onto itself with its half-step offset unchanged, and the lattice
+   * tears. `generateWorld` refuses such a map.
+   */
+  mirrored(index: number): number {
+    const y = (index / this.width) | 0;
+    const x = index - y * this.width;
+    return (this.height - 1 - y) * this.width + (this.width - 1 - x);
+  }
+
   /** Horizontal position in lattice units — odd rows are offset half a step. */
   worldX(index: number): number {
     const y = (index / this.width) | 0;

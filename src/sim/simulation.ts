@@ -2,7 +2,7 @@ import { Direction, DIRECTIONS } from './core/direction';
 import { OUT_OF_BOUNDS } from './core/grid';
 import { Hasher } from './core/hash';
 import { Rng } from './core/rng';
-import { SAVE_VERSION } from './save-version';
+import { OLDEST_SAVE_VERSION, SAVE_VERSION } from './save-version';
 import type { BuildingInfo, BuildingType } from './data/buildings';
 import { BuildingType as Type, buildingInfo } from './data/buildings';
 import { Profession, professionInfo } from './data/professions';
@@ -5691,6 +5691,12 @@ export class Simulation {
     if (snapshot.version > SAVE_VERSION) {
       throw new Error(`unsupported save version ${snapshot.version}`);
     }
+    // A save carries its seed, not its ground. Everything below lays buildings
+    // and roads back onto an island regenerated from that seed, which only
+    // works while a seed still means the same island.
+    if (snapshot.version < OLDEST_SAVE_VERSION) {
+      throw new Error(`save version ${snapshot.version} predates the mirrored map`);
+    }
 
     // Regenerating from the seed restores terrain and altitude exactly.
     const { world } = generateWorld({
@@ -5762,15 +5768,9 @@ export class Simulation {
       })),
     );
 
-    // Borders drawn before the edges were swept have the hexagon corners still
-    // on them — lone dots hanging off a province with nothing either side. The
-    // sweep is run once over the whole map so an old save comes up looking like
-    // a new one. Only the sweep: working the *whole* border out again would
-    // hand back ground buildings have long stood on, and pull those buildings
-    // down with it. Ground is re-derived as it changes hands, not on loading.
-    if (snapshot.version < 8) {
-      simulation.settleTheEdges([...simulation.world.owner.keys()]);
-    }
+    // The sweep that used to run here for saves older than version 8 has gone
+    // with them: nothing below version 10 is opened at all now, so it could
+    // never have run again.
 
     return simulation;
   }

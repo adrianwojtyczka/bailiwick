@@ -28,8 +28,10 @@ The method that has made these rounds trustworthy, in order:
 3. **Prove every new test discriminates.** Write a shell script that breaks the
    fix in the source — one deliberate breakage at a time — and checks a test
    goes red for each. Weak tests have slipped through before, and this is what
-   catches them. Recent rounds ran 12/12, 9/10 and 13/13; when a breakage is
+   catches them. Recent rounds ran 13/13, 9/9, 5/7 and 15/15; when a breakage is
    *not* caught, either strengthen the test or say plainly that it is untested.
+   A breakage that fails to go red is as often a bad breakage as a weak test —
+   check it really does break the thing before rewriting the assertion.
 4. **Measure, and report the after-figures next to the before.**
 5. **Full gate, then commit and push.**
 
@@ -93,6 +95,34 @@ building's node.
 wide (`takeTheDoorway`), and one porter (`storePorter`). Crates go in and out one
 at a time, both directions competing for the same door.
 
+**The two halves of the map are the same country.** The map is `MAP_WIDTH` 192
+by `MAP_HEIGHT` 96, and `grid.mirrored` — the half-turn `(col,row) → (W−1−col,
+H−1−row)` — is an exact adjacency-preserving automorphism of the lattice *when
+the height is even*, which `generateWorld` insists on. The rule worldgen holds
+itself to:
+
+> everything deliberate is decided on the near half and applied to both halves
+> through the mirror; everything noise-driven is made symmetric where it must
+> stay continuous, and stamped where it need not.
+
+Heights and terrain must stay continuous across the middle, so they are folded —
+`foldedNoise` resolves each pair to its western member first and does identical
+arithmetic either way round, which is what makes the halves match *to the bit*
+rather than to within a rounding. Objects and ore are laid by an `Rng` walking
+the map in index order, which no folding would make symmetric, so `mirrorHalf`
+stamps them west to east at the end. Any new per-point array must join one camp
+or the other, and `deals both players exactly the same ground` will say so.
+
+**Every start is guaranteed a mountain.** Most islands have none: six seeds in
+eight carried no ore at all before `raiseARange`, because the noise has to clear
+`MOUNTAIN_LEVEL` *and* `findDeepRock` wants a solid nineteen-node blob. So the
+shortfall is planted, like `stockStartArea`'s wood and stone — a range raised
+14–18 nodes out where the island has none, and `oreForTheRange` making up any
+shortfall of iron or coal in contiguous seams. Two traps here, both already
+paid for: a seam must not overwrite the other ore's guarantee, and protecting
+*all* of a plentiful ore leaves nowhere to put the scarce one. Keep a dozen of
+each and free the rest.
+
 **Territory is derived, never patched.** `redrawTerritory` is the only place
 ownership is decided. It runs three passes in this order:
 
@@ -127,16 +157,30 @@ with `mannedAt: 0` — manned since the beginning, in every case.
 - **Derived state is rebuilt on load, not saved**: `world.buildingSize`,
   `world.outpost`, `frontierPosts`, `busyDoorways`. Anything derived that is
   added must be rebuilt in `fromSnapshot`.
-- **Only *newer* save versions are refused.** Older ones load with defaults
-  filled in by `fromSnapshot` — say in the field's doc comment what nought means
-  for a save that predates it. `SAVE_VERSION` is 9.
+- **Saves are refused above `SAVE_VERSION` (10) and below `OLDEST_SAVE_VERSION`
+  (10).** Between those two, older saves load with defaults filled in by
+  `fromSnapshot` — say in the field's doc comment what nought means for a save
+  that predates it. The floor is new, and exists for one reason: a save carries
+  its *seed*, not its ground, and at version 10 the map was doubled and
+  mirrored, so a seed stopped meaning the same island. Raise the floor only when
+  the ground itself moves; a mere new field never justifies it.
 - **Order within a tick matters.** `update()` runs settlers, battles, doorways,
   captures, buildings, roads, growth; a sweep every 40 ticks re-aims stranded
   crates and reconciles reservations. A test that depends on which of two things
   happens first in a tick is a test that will rot — call the method directly.
 - **`baseNear` in the test file paints ownership** onto every site it tries
   before settling on one, so the map afterwards is partly the harness's doing.
-  Select points by *distance*, not by who currently holds them.
+  Select points by *distance*, not by who currently holds them. Do not "fix" it
+  to put the paint back on a rejected site: that trail of ground is what the
+  attacking tests march over, and removing it reddens forty of them. Tests that
+  care record which nodes changed hands and exclude those.
+- **Hard-coded point indices do not survive a change of map width**, since an
+  index is a row times a width. Find the nodes a test needs on the ground —
+  `2598` meant `(38,40)` on a 64-wide island and means nothing now.
+- **Cross-country walks are bounded** by `walkablePath`'s `maxExpansions`. It is
+  4000, sized for a map 192 nodes across; too small a bound does not report a
+  failure, it makes `sendHome` take the man into a store on the spot, which
+  reads in play as a man crossing the island without walking it.
 - **`holdIt` restores the garrison it found.** A building planted with an empty
   garrison comes back empty; set the men before calling it.
 - **Reservations are a cache of a fact the world already holds.** One missed
@@ -152,7 +196,7 @@ with `mannedAt: 0` — manned since the beginning, in every case.
 src/sim/simulation.ts        ~5,800 lines; nearly every round lands here
 src/sim/simulation.test.ts   ~6,000 lines; the bulk of the suite
 src/sim/core/                lattice, seeded RNG, entity pools, hashing
-src/sim/world/               generation, terrain, placement rules
+src/sim/world/               generation, the mirror, terrain, placement rules
 src/sim/transport/           flag graph, routing, road planning
 src/sim/data/                wares, buildings, professions as tables
 src/render/ src/ui/ src/platform/ src/game/   everything outside the sim

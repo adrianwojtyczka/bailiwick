@@ -42,7 +42,9 @@ const PLAYER = 1;
 
 function newGame(seed = 4242): Simulation {
   return Simulation.create({
-    width: 64,
+    // Doubled since the map became a mirror of itself: half of a 128-wide
+    // island is the 64-wide one these tests were written against.
+    width: 128,
     height: 64,
     seed,
     players: [{ name: 'You', colour: '#c4832b' }],
@@ -488,7 +490,10 @@ describe('determinism', () => {
     // deliberately, never reflexively.
     const sim = newGame(4242);
     run(sim, 1000);
-    expect(sim.hash()).toMatchInlineSnapshot(`"289ab9e3"`);
+    // Re-recorded when the map was doubled and mirrored. It is a hash of the
+    // world after a thousand ticks, and the world it starts from is a different
+    // island — so this moving was the change landing, not a rule slipping.
+    expect(sim.hash()).toMatchInlineSnapshot(`"ca655010"`);
   });
 });
 
@@ -3531,14 +3536,26 @@ describe('crates and a jammed flag', () => {
    * A ring of four flags — the headquarters and three more — so that every
    * crate has two ways home and a jam on one of them can be routed around.
    *
-   * The three nodes are picked from seed 4242's map; each step asserts, so a
-   * change in the terrain says which leg it broke rather than failing obscurely
-   * somewhere in the middle of a run.
+   * The three nodes used to be written down as indices off seed 4242's island,
+   * which stopped meaning anything the moment the map was doubled — an index is
+   * a row times a width. They are found on the ground now instead: the first
+   * three nodes out from the hall that will take a flag and stand clear of one
+   * another. Each step still asserts, so a change in the terrain says which leg
+   * it broke rather than failing obscurely in the middle of a run.
    */
   function ring(sim: Simulation) {
     const hq = headquarters(sim);
-    const points = [2598, 2472, 2538];
-    for (const point of points) expect(sim.placeFlag(PLAYER, point).ok).toBe(true);
+    const { grid } = sim.world;
+
+    const points: number[] = [];
+    for (const point of grid.pointsWithin(hq.flagPoint, 6)) {
+      if (points.length >= 3) break;
+      if (grid.distance(hq.flagPoint, point) < 3) continue;
+      if (points.some((taken) => grid.distance(taken, point) < 3)) continue;
+      if (!sim.placeFlag(PLAYER, point).ok) continue;
+      points.push(point);
+    }
+    expect(points).toHaveLength(3);
 
     const legs: ReadonlyArray<readonly [number, number]> = [
       [hq.flagPoint, points[0]!],
@@ -4578,7 +4595,9 @@ describe('a war', () => {
   /** A game with a dormant neighbour, as every real game now has. */
   function contested(seed = 4242): Simulation {
     return Simulation.create({
-      width: 96,
+      // The shape the game ships: the rival's half is this player's half turned
+      // about, so the two of them are dealt exactly the same country.
+      width: 192,
       height: 96,
       seed,
       players: [
@@ -4632,7 +4651,10 @@ describe('a war', () => {
       if (away < from || away > to) continue;
 
       // The ground has to be his before he can build on it, as it would be if
-      // he had pushed his frontier this far.
+      // he had pushed his frontier this far. Painted on every site *tried*, not
+      // only the one settled on, which leaves a corridor of his ground between
+      // the post and its target — the attacks below need it, and the border
+      // tests work around it by noting which nodes the harness painted.
       sim.world.owner[point] = PLAYER;
       for (const near of sim.world.grid.pointsWithin(point, 1)) sim.world.owner[near] = PLAYER;
 
@@ -6023,8 +6045,15 @@ describe('a war', () => {
     // beyond them they are well inside a continuous province; once it comes
     // down the border falls back onto them, and a flag may not stand on a
     // border node — which is the watchtower case from the save.
+    // Outermost ring first. Flags will not stand next to one another, so
+    // working outwards fills the ring at twelve and leaves the one at thirteen
+    // — the ring that becomes the border — with nowhere to go. It is the ring
+    // at thirteen this test is about.
+    const outward = (a: number, b: number) =>
+      sim.world.grid.distance(home.point, b) - sim.world.grid.distance(home.point, a) || a - b;
+
     const edge: number[] = [];
-    for (const point of sim.world.grid.pointsWithin(home.point, HALL_REACH)) {
+    for (const point of sim.world.grid.pointsWithin(home.point, HALL_REACH).sort(outward)) {
       if (sim.world.grid.distance(home.point, point) < HALL_REACH - 1) continue;
       if (!canPlaceFlag(sim.world, point, PLAYER)) continue;
       if (sim.placeFlag(PLAYER, point).ok) edge.push(point);
@@ -6286,11 +6315,24 @@ describe('a war', () => {
       for (let point = 0; point < sim.world.owner.length; point += 1) {
         const owner = sim.world.owner[point];
         if (owner === 0) continue;
+
         let same = 0;
         for (const near of sim.world.grid.pointsWithin(point, 1)) {
           if (near !== point && sim.world.owner[near] === owner) same += 1;
         }
-        if (same < 3) found.push(point);
+        if (same >= 3) continue;
+
+        // A building keeps a guaranteed ring, handed back after the sweep with
+        // nothing allowed to undo it. Where somebody else's ring reaches a node
+        // next door, it takes that node out from under this one and leaves it
+        // looking thin — the keep rule working, not a border half drawn.
+        const pinched = sim.buildings.all().some((building) => {
+          if (building.owner === owner) return false;
+          const keep = buildingInfo(building.type).size === BuildingSize.Castle ? 2 : 1;
+          return sim.world.grid.distance(point, building.point) <= keep + 1;
+        });
+
+        if (!pinched) found.push(point);
       }
       return found;
     };
@@ -6302,16 +6344,24 @@ describe('a war', () => {
     expect(thin(sim)).toEqual([]);
 
     // And after a capture, across the ground the capture worked out. Only that
-    // ground: `baseNear` paints a site by hand to stand a post on, which is not
-    // a border the simulation ever drew.
+    // ground, and only the part of it the simulation itself owns: `baseNear`
+    // paints by hand on every site it tries, and paint is not a border the game
+    // ever drew. Which nodes those are is noted rather than guessed at, since
+    // where the harness happens to paint moves with the map.
     const target = outpostsOf(sim, RIVAL)[0]!;
+    const before = Uint8Array.from(sim.world.owner);
     baseNear(sim, target.point, 8);
+    const painted = new Set<number>();
+    for (let point = 0; point < before.length; point += 1) {
+      if (before[point] !== sim.world.owner[point]) painted.add(point);
+    }
+
     expect(sim.attack(PLAYER, target.point, 7).ok).toBe(true);
     fightItOut(sim);
     run(sim, 200);
 
     const worked = new Set(sim.world.grid.pointsWithin(target.point, 6));
-    expect(thin(sim).filter((point) => worked.has(point))).toEqual([]);
+    expect(thin(sim).filter((point) => worked.has(point) && !painted.has(point))).toEqual([]);
   });
 
   it('clears what falls outside the border when a post comes down', () => {

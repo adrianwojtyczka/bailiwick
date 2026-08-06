@@ -142,12 +142,20 @@ export function planRoad(
  *
  * Deliberately bounded: these journeys are always short, and refusing to search
  * further keeps a blocked worker from stalling the whole tick.
+ *
+ * Not *that* short, though. The bound used to be 1500, which was ample on a map
+ * 96 nodes across and quietly too small on one 192 wide: a man turned out of a
+ * post a hundred nodes from his own hall found no way home along ground he
+ * could plainly walk, and `sendHome` took him in on the spot instead — a man
+ * crossing the island without walking it. The road home in that case is 105
+ * steps and wants a shade over 2000 expansions. A hopeless search still costs
+ * about seven milliseconds, well inside a 200 ms tick.
  */
 export function walkablePath(
   world: World,
   from: number,
   to: number,
-  maxExpansions = 1500,
+  maxExpansions = 4000,
 ): number[] | undefined {
   if (from === to) return [];
 
