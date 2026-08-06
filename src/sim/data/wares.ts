@@ -121,6 +121,3 @@ export function wareInfo(ware: Ware): WareInfo {
   if (!info) throw new Error(`unknown ware ${ware}`);
   return info;
 }
-
-/** Anything a mine's workers will eat. */
-export const MINER_FOODS: readonly Ware[] = [Ware.Bread, Ware.Fish, Ware.Meat];

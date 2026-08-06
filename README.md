@@ -53,8 +53,21 @@ the swords, shields and beer to fill it, is how a province keeps growing.
 
 Your mountain is a dozen or so nodes out, past the levelled apron the hall
 stands on. Send a geologist from a flag near it: he marks what he finds, and a
-coal mine and an iron mine on those marks — fed with bread, and eventually
-meat — are what turn granite and ore into swords.
+coal mine and an iron mine on those marks are what turn ore into swords.
+
+**Every mine keeps to its own food**, so the mountain is only as good as the
+kitchens behind it:
+
+| mine | eats | which means building |
+|---|---|---|
+| Coal | Bread | farm, mill, well, bakery |
+| Iron | Meat | farm, well, pig farm, slaughterhouse |
+| Gold | Fish | a fishery |
+| Granite | Fish | a fishery |
+
+A coal mine will not touch a fish however long it stands idle. The hall opens
+with four loaves, four joints and eight fish — enough to work the first mine of
+any kind while its chain is built, and no more.
 
 ## Development
 
@@ -141,7 +154,8 @@ these chains —
 - **Mining** — geologists who go out and survey the rock, marking the one spot
   they struck, and the coal, iron, gold and granite mines sunk on what they
   find. Ore lies well inside a range, so the mountains have to be entered
-  properly. Miners must be fed.
+  properly, and each mine eats its own food and no other: bread for coal, meat
+  for iron, fish for gold and granite.
 - **Metal and tools** — iron smelters, mints, armouries, and a metalworks that
   makes whichever tool the player is shortest of.
 - **Territory** — outposts from a barracks to a fortress, each claiming the

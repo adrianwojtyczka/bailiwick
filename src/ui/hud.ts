@@ -19,6 +19,37 @@ import {
 } from '../sim/world/terrain';
 import { button, clear, el } from './dom';
 
+/**
+ * What a working building is holding of each thing it takes in.
+ *
+ * A workshop's rows come straight off its recipe. A mine's come off its food,
+ * which the panel showed nothing of until each mine was given its own: "Waiting
+ * for materials" over a coal mine is no use to anybody who cannot see that the
+ * material is bread. All four mines eat one thing, so this is one row; a mine
+ * that ever eats two would list both, since either would set it working.
+ */
+export function inputRows(
+  info: BuildingInfo,
+  building: Building,
+): readonly { readonly ware: Ware; readonly count: number }[] {
+  const { behaviour } = info;
+
+  if (behaviour.kind === 'craft') {
+    return behaviour.inputs.map((item, index) => ({
+      ware: item.ware,
+      count: building.inputs[index] ?? 0,
+    }));
+  }
+
+  if (behaviour.kind === 'extract' && behaviour.food) {
+    // One slot between them, however many wares would fill it.
+    const held = building.inputs[0] ?? 0;
+    return behaviour.food.map((ware) => ({ ware, count: held }));
+  }
+
+  return [];
+}
+
 const STATUS_TEXT: Readonly<Record<BuildingStatus, string>> = {
   [BuildingStatus.Working]: 'Working',
   [BuildingStatus.AwaitingWorker]: 'Waiting for a worker',
@@ -514,9 +545,9 @@ export class Hud {
 
       const progress = Math.round((building.buildProgress / Math.max(1, info.buildTicks)) * 100);
       children.push(el('p', { class: 'panel__note' }, `Built: ${progress}%`));
-    } else if (info.behaviour.kind === 'craft') {
-      const inputs = info.behaviour.inputs.map((item, index) =>
-        el('li', {}, `${wareInfo(item.ware).name}: ${building.inputs[index] ?? 0}`),
+    } else if (inputRows(info, building).length > 0) {
+      const inputs = inputRows(info, building).map((row) =>
+        el('li', {}, `${wareInfo(row.ware).name}: ${row.count}`),
       );
       children.push(el('ul', { class: 'panel__list' }, ...inputs));
     } else if (info.behaviour.kind === 'headquarters' || info.behaviour.kind === 'store') {

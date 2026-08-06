@@ -2,7 +2,7 @@ import type { BuildingSize } from '../world/buildspace';
 import { BuildingSize as Size } from '../world/buildspace';
 import { MapObject, Resource } from '../world/terrain';
 import { Profession } from './professions';
-import { MINER_FOODS, Ware } from './wares';
+import { Ware } from './wares';
 
 export interface WareAmount {
   readonly ware: Ware;
@@ -57,7 +57,14 @@ export type BuildingBehaviour =
       readonly workTicks: number;
       /** Mines and fisheries exhaust their deposit; wells do not. */
       readonly depletes: boolean;
-      /** Wares the workers eat before they will work, if any. */
+      /**
+       * What the workers eat before they will work, if anything.
+       *
+       * Each mine has its own diet and keeps to it: a coal mine will not touch
+       * fish however hungry it is, which is what makes each food chain worth
+       * building rather than one of them worth building three times. Several
+       * wares here would mean any of them will do, but no mine says that today.
+       */
       readonly food?: readonly Ware[];
     }
   /** Turns delivered wares into another ware. */
@@ -474,10 +481,10 @@ export const BUILDINGS: readonly BuildingInfo[] = [
       radius: 0,
       workTicks: 180,
       depletes: true,
-      food: MINER_FOODS,
+      food: [Ware.Bread],
     },
     available: true,
-    description: 'Digs coal. Miners must be fed.',
+    description: 'Digs coal. The miners eat bread and nothing else.',
   },
   {
     id: BuildingType.IronMine,
@@ -494,10 +501,10 @@ export const BUILDINGS: readonly BuildingInfo[] = [
       radius: 0,
       workTicks: 180,
       depletes: true,
-      food: MINER_FOODS,
+      food: [Ware.Meat],
     },
     available: true,
-    description: 'Digs iron ore. Miners must be fed.',
+    description: 'Digs iron ore. The miners eat meat and nothing else.',
   },
   {
     id: BuildingType.GoldMine,
@@ -514,10 +521,10 @@ export const BUILDINGS: readonly BuildingInfo[] = [
       radius: 0,
       workTicks: 200,
       depletes: true,
-      food: MINER_FOODS,
+      food: [Ware.Fish],
     },
     available: true,
-    description: 'Digs gold ore for the mint.',
+    description: 'Digs gold ore for the mint. The miners eat fish and nothing else.',
   },
   {
     id: BuildingType.GraniteMine,
@@ -534,10 +541,11 @@ export const BUILDINGS: readonly BuildingInfo[] = [
       radius: 0,
       workTicks: 180,
       depletes: true,
-      food: MINER_FOODS,
+      food: [Ware.Fish],
     },
     available: true,
-    description: 'Wins stone from the mountain when the quarries run out.',
+    description:
+      'Wins stone from the mountain when the quarries run out. The miners eat fish.',
   },
 
   {

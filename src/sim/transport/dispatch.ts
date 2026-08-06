@@ -178,9 +178,14 @@ function heldOf(building: Building, ware: Ware): number {
  * between buildings of that same kind.
  *
  * So an armoury and a smelter halve the coal between them however far apart
- * they are, and the four kinds of mine share the bread — while two sawmills, of
- * one kind, still send every log to whichever is nearer, which is what makes
- * building a mill beside the woodcutter worthwhile.
+ * they are, and a gold mine and a granite mine halve the catch — while two
+ * sawmills, of one kind, still send every log to whichever is nearer, which is
+ * what makes building a mill beside the woodcutter worthwhile.
+ *
+ * The mines used to be the example here: all four ate anything and shared the
+ * bread four ways. Each keeps to its own food now, so bread has one claimant
+ * kind and goes to the nearest coal mine, meat to the nearest iron mine, and
+ * only fish is still asked for by two trades at once.
  *
  * The comparison is made on what each trade actually holds, counting what is
  * already on its way, so it needs no memory of what was sent last and stays a

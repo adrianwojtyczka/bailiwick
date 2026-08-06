@@ -490,10 +490,11 @@ describe('determinism', () => {
     // deliberately, never reflexively.
     const sim = newGame(4242);
     run(sim, 1000);
-    // Re-recorded when the map was doubled and mirrored. It is a hash of the
-    // world after a thousand ticks, and the world it starts from is a different
-    // island — so this moving was the change landing, not a rule slipping.
-    expect(sim.hash()).toMatchInlineSnapshot(`"ca655010"`);
+    // Re-recorded twice: when the map was doubled and mirrored, and again when
+    // the hall began stocking bread and meat for the mines. Both times the hash
+    // moved because the world it starts from moved, which is the change landing
+    // rather than a rule slipping. There is no mine in these thousand ticks.
+    expect(sim.hash()).toMatchInlineSnapshot(`"fa4fcb90"`);
   });
 });
 
@@ -2121,6 +2122,176 @@ describe('sharing a ware between trades', () => {
     } else if (furtherCost < nearerCost) {
       expect(firstAt < 0 || secondAt < firstAt).toBe(true);
     }
+  });
+});
+
+describe('what a mine eats', () => {
+  /**
+   * A working mine of a given kind, sunk on a seam of its own ore.
+   *
+   * Reached in rather than built: the ranges are raised a dozen nodes beyond
+   * the hall's own claim, so a mine needs a frontier post and a road to it
+   * before a builder will ever walk out, and none of that is what these tests
+   * are about.
+   */
+  function mineOf(sim: Simulation, type: BuildingType): Building {
+    const { grid } = sim.world;
+    const hq = headquarters(sim);
+    const behaviour = buildingInfo(type).behaviour;
+    if (behaviour.kind !== 'extract') throw new Error('not a mine');
+
+    for (const point of grid.pointsWithin(hq.point, 30)) {
+      if (sim.world.resource[point] !== behaviour.resource) continue;
+      for (const near of grid.pointsWithin(point, 2)) sim.world.owner[near] = PLAYER;
+
+      const mine = reachIn(sim).createBuilding(type, point, PLAYER);
+      if (!mine) continue;
+      mine.state = BuildingState.Complete;
+      mine.status = BuildingStatus.Working;
+      return mine;
+    }
+    throw new Error(`nowhere to sink a ${buildingInfo(type).name}`);
+  }
+
+  interface Innards {
+    createBuilding(type: BuildingType, point: number, owner: number): Building | undefined;
+  }
+
+  function reachIn(sim: Simulation): Innards {
+    return sim as unknown as Innards;
+  }
+
+  const DIETS: readonly { type: BuildingType; eats: Ware }[] = [
+    { type: BuildingType.CoalMine, eats: Ware.Bread },
+    { type: BuildingType.IronMine, eats: Ware.Meat },
+    { type: BuildingType.GoldMine, eats: Ware.Fish },
+    { type: BuildingType.GraniteMine, eats: Ware.Fish },
+  ];
+
+  const FOODS: readonly Ware[] = [Ware.Bread, Ware.Fish, Ware.Meat];
+
+  it('takes in its own food and turns the rest away', () => {
+    const sim = newGame();
+
+    for (const { type, eats } of DIETS) {
+      const mine = mineOf(sim, type);
+
+      for (const food of FOODS) {
+        const wanted = food === eats;
+        expect([buildingInfo(type).name, food, willAccept(mine, food)]).toEqual([
+          buildingInfo(type).name,
+          food,
+          wanted,
+        ]);
+        expect(outstandingDemand(mine, food) > 0).toBe(wanted);
+      }
+
+      // And nothing else at all: a mine is not a warehouse.
+      expect(willAccept(mine, Ware.Board)).toBe(false);
+      expect(willAccept(mine, Ware.Coal)).toBe(false);
+    }
+  });
+
+  it('stops asking once its four are in, whatever else is going spare', () => {
+    const sim = newGame();
+    const mine = mineOf(sim, BuildingType.CoalMine);
+
+    expect(outstandingDemand(mine, Ware.Bread)).toBe(INPUT_STOCK_LIMIT);
+    mine.inputs[0] = INPUT_STOCK_LIMIT;
+    expect(outstandingDemand(mine, Ware.Bread)).toBe(0);
+    expect(willAccept(mine, Ware.Bread)).toBe(false);
+  });
+
+  /**
+   * The diet is a rule about the mine, not merely about the routing: food of
+   * the wrong kind put straight into a mine's own hands still leaves it idle.
+   */
+  it('will not work on another mine’s food', () => {
+    const sim = newGame();
+    const hq = headquarters(sim);
+
+    // Fish and meat in the province, and not a loaf anywhere.
+    hq.stock[Ware.Bread] = 0;
+    hq.stock[Ware.Fish] = 20;
+    hq.stock[Ware.Meat] = 20;
+
+    const coal = mineOf(sim, BuildingType.CoalMine);
+    const route = planRoad(sim.world, hq.flagPoint, coal.flagPoint, PLAYER);
+    expect(route).toBeDefined();
+    expect(sim.placeRoad(PLAYER, route!).ok).toBe(true);
+
+    run(sim, 4000);
+    expect(sim.storedWare(PLAYER, Ware.Coal)).toBe(0);
+    expect(coal.inputs[0] ?? 0).toBe(0);
+
+    // A loaf, and only then does the seam come up.
+    hq.stock[Ware.Bread] = 20;
+    run(sim, 6000);
+    expect(sim.storedWare(PLAYER, Ware.Coal)).toBeGreaterThan(0);
+  });
+
+  /**
+   * Fish is the one food two trades still ask for, so it is the one place the
+   * sharing rule in `chooseDestination` still has work to do among the mines.
+   */
+  it('splits the catch between a gold mine and a granite mine', () => {
+    const sim = newGame();
+    const hq = headquarters(sim);
+
+    const gold = mineOf(sim, BuildingType.GoldMine);
+    const granite = mineOf(sim, BuildingType.GraniteMine);
+    for (const mine of [gold, granite]) {
+      const route = planRoad(sim.world, hq.flagPoint, mine.flagPoint, PLAYER);
+      expect(route).toBeDefined();
+      expect(sim.placeRoad(PLAYER, route!).ok).toBe(true);
+    }
+
+    // No worker will reach either, so nothing is eaten and what each was sent
+    // is still sitting in it at the end.
+    hq.stock[Ware.Fish] = 40;
+    gold.status = BuildingStatus.AwaitingWorker;
+    granite.status = BuildingStatus.AwaitingWorker;
+
+    let goldFed = 0;
+    let graniteFed = 0;
+    for (let i = 0; i < 8000; i += 1) {
+      sim.update();
+      goldFed = Math.max(goldFed, gold.inputs[0] ?? 0);
+      graniteFed = Math.max(graniteFed, granite.inputs[0] ?? 0);
+    }
+
+    expect(goldFed).toBeGreaterThan(0);
+    expect(graniteFed).toBeGreaterThan(0);
+  });
+
+  it('sends the bread past a granite mine to the coal mine behind it', () => {
+    const sim = newGame();
+    const hq = headquarters(sim);
+
+    const granite = mineOf(sim, BuildingType.GraniteMine);
+    const coal = mineOf(sim, BuildingType.CoalMine);
+    for (const mine of [granite, coal]) {
+      const route = planRoad(sim.world, hq.flagPoint, mine.flagPoint, PLAYER);
+      expect(route).toBeDefined();
+      expect(sim.placeRoad(PLAYER, route!).ok).toBe(true);
+    }
+
+    hq.stock[Ware.Bread] = 40;
+    hq.stock[Ware.Fish] = 0;
+    granite.status = BuildingStatus.AwaitingWorker;
+    coal.status = BuildingStatus.AwaitingWorker;
+
+    let graniteFed = 0;
+    let coalFed = 0;
+    for (let i = 0; i < 8000; i += 1) {
+      sim.update();
+      graniteFed = Math.max(graniteFed, granite.inputs[0] ?? 0);
+      coalFed = Math.max(coalFed, coal.inputs[0] ?? 0);
+    }
+
+    // However the two lie, a loaf is a coal miner's and nobody else's.
+    expect(coalFed).toBeGreaterThan(0);
+    expect(graniteFed).toBe(0);
   });
 });
 

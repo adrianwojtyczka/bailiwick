@@ -273,7 +273,14 @@ const STARTING_STOCK: readonly { ware: Ware; count: number }[] = [
   { ware: Ware.Crucible, count: 2 },
   { ware: Ware.RollingPin, count: 1 },
   { ware: Ware.Cleaver, count: 1 },
+  // A little of each food, because a mine eats its own and no other: without
+  // this a coal mine could not turn a wheel until a farm, a mill, a well and a
+  // bakery stood behind it, and an iron mine not until a pig farm and a
+  // slaughterhouse did. Enough to work the first mine of any kind while its
+  // chain is built, and not enough to matter once it is.
   { ware: Ware.Fish, count: 8 },
+  { ware: Ware.Bread, count: 4 },
+  { ware: Ware.Meat, count: 4 },
 ];
 
 const STARTING_SETTLERS = 32;
